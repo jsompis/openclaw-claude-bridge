@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Environment — contains secrets (DASHBOARD_PASS), never commit
+.env
+
+# Runtime state — contains session IDs, channel names, request history
+state.json
+
+# Systemd service has absolute paths, copy manually
+# service/openclaw-claude-bridge.service is safe to commit (no secrets)
+
+# OS
+.DS_Store
+._*
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Security
+SECURITY-AUDIT.md
+
+# Internal docs — design notes, not for public
+docs/internal/

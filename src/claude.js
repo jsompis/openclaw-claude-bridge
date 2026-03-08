@@ -1,0 +1,222 @@
+'use strict';
+
+const { spawn } = require('child_process');
+
+const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+
+/**
+ * Map OpenClaw model IDs to Claude CLI model names.
+ * Uses CLI aliases (opus/sonnet/haiku) by default so we always get the latest
+ * model without code changes.  Override via env vars in .env if needed,
+ * e.g. OPUS_MODEL=opus[1m] when 1M context becomes available.
+ */
+function resolveModel(modelId) {
+    const modelMap = {
+        'claude-opus-latest':    process.env.OPUS_MODEL   || 'opus',
+        'claude-sonnet-latest':  process.env.SONNET_MODEL || 'sonnet',
+        'claude-haiku-latest':   process.env.HAIKU_MODEL  || 'haiku',
+    };
+    return modelMap[modelId] || modelId;
+}
+
+/**
+ * Run Claude CLI with the given system prompt and conversation text.
+ *
+ * @param {string} systemPrompt  Combined developer message + tool instructions
+ * @param {string} promptText    Conversation history + user message
+ * @param {string} modelId       OpenClaw model ID
+ * @param {function} onChunk     Called with each text chunk as it arrives
+ * @returns {Promise<string>}    Resolves with the final complete text
+ */
+/**
+ * @typedef {{ text: string, usage: { input_tokens: number, output_tokens: number } }} ClaudeResult
+ */
+
+const IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_MS) || 120000; // 2 min idle = dead
+
+/**
+ * Map OC reasoning_effort levels to Claude CLI --effort levels.
+ * OC sends: "minimal" | "low" | "medium" | "high" | "xhigh"
+ * Claude CLI accepts: "low" | "medium" | "high"
+ */
+function mapEffort(reasoningEffort) {
+    if (!reasoningEffort) return null;
+    const map = {
+        'minimal': 'low',
+        'low':     'low',
+        'medium':  'medium',
+        'high':    'high',
+        'xhigh':   'high',
+    };
+    return map[reasoningEffort] || null;
+}
+
+function runClaude(systemPrompt, promptText, modelId, onChunk, signal, reasoningEffort, sessionId, isResume) {
+    return new Promise((resolve, reject) => {
+        const model = resolveModel(modelId);
+
+        const args = [
+            '--print',
+            '--dangerously-skip-permissions',
+            '--output-format', 'stream-json',
+            '--verbose',
+        ];
+
+        // Always pass --model (not persisted in session)
+        args.push('--model', model);
+
+        if (isResume && sessionId) {
+            // Resume existing session — conversation history already in session
+            args.push('--resume', sessionId);
+        } else if (sessionId) {
+            // New session
+            args.push('--session-id', sessionId);
+        }
+
+        // Replace Claude Code default system prompt (removes ~15-20KB of irrelevant noise)
+        if (systemPrompt) {
+            args.push('--system-prompt', systemPrompt);
+        }
+
+        // Always disable native tools (CLI flag, not session property)
+        args.push('--tools', '');
+
+        // Map OC reasoning_effort → Claude CLI --effort
+        const effort = mapEffort(reasoningEffort);
+        if (effort) {
+            args.push('--effort', effort);
+        }
+
+        const env = { ...process.env };
+
+        // Disable thinking when OC says reasoning=false (no reasoning_effort)
+        if (!reasoningEffort) {
+            env.MAX_THINKING_TOKENS = '0';
+        }
+
+        const thinking = reasoningEffort ? 'on' : 'off';
+        console.log(`[claude.js] Spawning: ${CLAUDE_BIN} ${args.slice(0, 6).join(' ')} ... model=${model} effort=${effort || 'default'} thinking=${thinking} resume=${!!isResume}`);
+
+        const proc = spawn(CLAUDE_BIN, args, {
+            cwd: '/tmp',
+            env,
+            stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        let settled = false;
+        const kill = (reason) => {
+            if (settled) return;
+            settled = true;
+            proc.kill('SIGTERM');
+            setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3000);
+            reject(new Error(reason));
+        };
+
+        // Kill on client disconnect (AbortSignal)
+        if (signal) {
+            signal.addEventListener('abort', () => kill('Client disconnected'), { once: true });
+        }
+
+        // Idle timeout: reset on every stdout activity.
+        // Claude is alive as long as it produces output (tool calls, results, etc.)
+        // Only kill if it goes silent for IDLE_TIMEOUT_MS.
+        let idleTimer = setTimeout(() => kill(`Idle timeout (${IDLE_TIMEOUT_MS / 1000}s no activity)`), IDLE_TIMEOUT_MS);
+        const resetIdle = () => {
+            clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => kill(`Idle timeout (${IDLE_TIMEOUT_MS / 1000}s no activity)`), IDLE_TIMEOUT_MS);
+        };
+
+        // Hard timeout: absolute max runtime regardless of activity (20 min)
+        const MAX_RUN_MS = 20 * 60 * 1000;
+        const hardTimer = setTimeout(() => kill(`Hard timeout (${MAX_RUN_MS / 60000}min)`), MAX_RUN_MS);
+
+        // Write conversation to stdin
+        proc.stdin.write(promptText);
+        proc.stdin.end();
+
+        let fullText = '';
+        let fullUsage = { input_tokens: 0, output_tokens: 0 };
+        let buffer = '';
+
+        proc.stdout.on('data', (chunk) => {
+            resetIdle(); // Claude is alive — reset idle timer
+            buffer += chunk.toString();
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // keep incomplete line
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+
+                try {
+                    const event = JSON.parse(trimmed);
+                    handleEvent(event, onChunk, (text) => { fullText = text; }, (u) => { fullUsage = u; });
+                } catch {
+                    // Non-JSON line (e.g. debug output), ignore
+                }
+            }
+        });
+
+        proc.stderr.on('data', (data) => {
+            const msg = data.toString().trim();
+            if (msg) console.error(`[claude stderr] ${msg}`);
+        });
+
+        proc.on('close', (code) => {
+            clearTimeout(idleTimer);
+            clearTimeout(hardTimer);
+            if (settled) return;
+            settled = true;
+
+            // Process any remaining buffered data
+            if (buffer.trim()) {
+                try {
+                    const event = JSON.parse(buffer.trim());
+                    handleEvent(event, onChunk, (text) => { fullText = text; }, (u) => { fullUsage = u; });
+                } catch {}
+            }
+
+            if (code !== 0 && !fullText) {
+                reject(new Error(`Claude exited with code ${code}`));
+            } else {
+                resolve({ text: fullText, usage: fullUsage });
+            }
+        });
+
+        proc.on('error', (err) => {
+            clearTimeout(idleTimer);
+            clearTimeout(hardTimer);
+            if (settled) return;
+            settled = true;
+            reject(new Error(`Failed to spawn Claude: ${err.message}`));
+        });
+    });
+}
+
+/**
+ * Parse a stream-json event and extract text content.
+ *
+ * With --tools "" (no native tools), Claude only outputs text.
+ * We extract the final result text and usage from the stream.
+ */
+function handleEvent(event, onChunk, setFull, setUsage) {
+    if (event.type === 'result') {
+        const result = event.result;
+        if (typeof result === 'string' && result) {
+            setFull(result);
+        }
+        // Pass through the full token usage breakdown + cost from Claude CLI.
+        const u = event.usage;
+        if (u && typeof u.input_tokens === 'number') {
+            setUsage({
+                input_tokens:          u.input_tokens ?? 0,
+                cache_creation_tokens: u.cache_creation_input_tokens ?? 0,
+                cache_read_tokens:     u.cache_read_input_tokens ?? 0,
+                output_tokens:         u.output_tokens ?? 0,
+                cost_usd:              event.total_cost_usd ?? 0,
+            });
+        }
+    }
+}
+
+module.exports = { runClaude };

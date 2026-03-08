@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  openclaw-claude-bridge LaunchAgent template
+  Recommended: use ./service/install-mac.sh instead of editing this manually.
+  It auto-detects paths, reads .env, and generates the correct plist.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.openclaw.claude-bridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>src/index.js</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_USERNAME/openclaw-claude-bridge</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/Users/YOUR_USERNAME/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/YOUR_USERNAME</string>
+        <!-- Copy variables from .env here, e.g.: -->
+        <!-- <key>DASHBOARD_PASS</key> -->
+        <!-- <string>your_password_here</string> -->
+        <!-- <key>CLAUDE_BIN</key> -->
+        <!-- <string>/Users/YOUR_USERNAME/.local/bin/claude</string> -->
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/openclaw-claude-bridge/bridge.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/openclaw-claude-bridge/bridge-error.log</string>
+</dict>
+</plist>

@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+/* Geist variable fonts */
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/Geist-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("/fonts/GeistMono-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", "SF Mono", ui-monospace, monospace;
+
+  /* Dark mode (default) — soft charcoal, comfortable on eyes */
+  --color-page: oklch(0.19 0 0);
+  --color-background: oklch(0.23 0 0);
+  --color-foreground: oklch(0.93 0 0);
+  --color-card: oklch(0.21 0 0);
+  --color-card-foreground: oklch(0.93 0 0);
+  --color-sidebar: oklch(0.18 0 0);
+  --color-border: oklch(0.30 0 0);
+  --color-muted: oklch(0.28 0 0);
+  --color-muted-foreground: oklch(0.60 0 0);
+  --color-accent: oklch(0.28 0 0);
+  --color-accent-foreground: oklch(0.93 0 0);
+  --color-destructive: oklch(0.55 0.2 27);
+  --color-primary: oklch(0.93 0 0);
+  --color-primary-foreground: oklch(0.18 0 0);
+  --color-secondary: oklch(0.26 0 0);
+  --color-secondary-foreground: oklch(0.93 0 0);
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+}
+
+/* Light mode overrides */
+html.light {
+  --color-page: oklch(0.94 0 0);
+  --color-background: oklch(0.98 0 0);
+  --color-foreground: oklch(0.09 0 0);
+  --color-card: oklch(1.0 0 0);
+  --color-card-foreground: oklch(0.09 0 0);
+  --color-sidebar: oklch(0.97 0 0);
+  --color-border: oklch(0.90 0 0);
+  --color-muted: oklch(0.96 0 0);
+  --color-muted-foreground: oklch(0.40 0 0);
+  --color-accent: oklch(0.96 0 0);
+  --color-accent-foreground: oklch(0.09 0 0);
+  --color-destructive: oklch(0.55 0.2 27);
+  --color-primary: oklch(0.09 0 0);
+  --color-primary-foreground: oklch(0.98 0 0);
+  --color-secondary: oklch(0.96 0 0);
+  --color-secondary-foreground: oklch(0.09 0 0);
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-page);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  min-height: 100vh;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px oklch(0.7 0.18 145 / 0.4); }
+  50% { opacity: 0.3; box-shadow: none; }
+}
+
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.4s ease-out both;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2.5s infinite;
+}
+
+/* Thin scrollbars */
+.scrollbar-thin::-webkit-scrollbar { width: 3px; height: 3px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: oklch(0.35 0 0); border-radius: 2px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+
+html.light .scrollbar-thin::-webkit-scrollbar-thumb { background: oklch(0.78 0 0); }
