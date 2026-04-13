@@ -312,12 +312,17 @@ function parseToolCalls(text) {
  */
 function cleanResponseText(text) {
     if (!text) return text;
-    return text
+    const stripped = text
         .replace(/<tool_thinking>[\s\S]*?<\/tool_thinking>/g, '')
         .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
         .replace(/<tool_result[\s\S]*?<\/tool_result>/g, '')
-        .replace(/<previous_response>[\s\S]*?<\/previous_response>/g, '')
-        .replace(/\n{3,}/g, '\n\n')
+        .replace(/<previous_response>[\s\S]*?<\/previous_response>/g, '');
+    // Collapse 3+ newlines only OUTSIDE fenced code blocks, to preserve
+    // intentional formatting inside triple-backtick fences.
+    const parts = stripped.split(/(```[\s\S]*?```)/);
+    return parts
+        .map((part, idx) => idx % 2 === 0 ? part.replace(/\n{3,}/g, '\n\n') : part)
+        .join('')
         .trim();
 }
 
