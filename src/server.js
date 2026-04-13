@@ -277,15 +277,27 @@ function parseToolCalls(text) {
     const calls = [];
     let match;
     while ((match = regex.exec(text)) !== null) {
+        const raw = (match[1] || '').trim();
+        const start = raw.indexOf('{');
+        const end = raw.lastIndexOf('}');
+        if (start === -1 || end === -1 || end < start) {
+            console.error(`[parseToolCalls] No JSON object found in block: ${raw.slice(0, 300)}`);
+            continue;
+        }
+        const jsonText = raw.slice(start, end + 1);
         try {
-            const parsed = JSON.parse(match[1]);
+            const parsed = JSON.parse(jsonText);
+            if (!parsed || typeof parsed.name !== 'string') {
+                console.error(`[parseToolCalls] Invalid tool_call payload: ${jsonText.slice(0, 300)}`);
+                continue;
+            }
             calls.push({
                 id: `call_${uuidv4().slice(0, 8)}`,
                 name: parsed.name,
                 arguments: parsed.arguments || {},
             });
         } catch (err) {
-            console.error(`[parseToolCalls] Failed to parse: ${match[1]}`);
+            console.error(`[parseToolCalls] Failed to parse JSON: ${jsonText.slice(0, 300)}`);
         }
     }
     return calls;
