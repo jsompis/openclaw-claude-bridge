@@ -103,7 +103,6 @@ function mapEffort(reasoningEffort) {
 const SCRUB_PATTERNS = [
     /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g,   // SCREAMING_SNAKE_CASE (2+ segments)
     /\[\[\s*(\w+)\s*\]\]/g,                    // [[bracket_tags]]
-    /\bsessions_[a-z_]+\b/g,                   // sessions_* tool names
 ];
 
 const SCRUB_WHITELIST = new Set([
@@ -236,8 +235,11 @@ function runClaude(systemPrompt, promptText, modelId, onChunk, signal, reasoning
             args.push('--system-prompt', systemPrompt);
         }
 
-        // Always disable native tools (CLI flag, not session property)
+        // Always disable Claude built-in tools. Also force MCP isolation so
+        // ambient local MCP servers cannot leak into the bridge session and
+        // bypass OpenClaw's tool loop.
         args.push('--tools', '');
+        args.push('--strict-mcp-config');
 
         // Map OC reasoning_effort → Claude CLI --effort
         const effort = mapEffort(reasoningEffort);

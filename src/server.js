@@ -306,6 +306,22 @@ function parseToolCalls(text) {
     return calls;
 }
 
+function getAvailableToolNames(tools) {
+    if (!Array.isArray(tools)) return [];
+    return tools.map(tool => tool?.function?.name || tool?.name).filter(Boolean);
+}
+
+function filterToolCalls(toolCalls, availableToolNames) {
+    const allowed = new Set(availableToolNames || []);
+    const valid = [];
+    const invalid = [];
+    for (const call of toolCalls || []) {
+        if (allowed.has(call.name)) valid.push(call);
+        else invalid.push(call);
+    }
+    return { valid, invalid };
+}
+
 /**
  * Strip internal XML tags that Claude may echo back from conversation context.
  * These are meant for Claude's consumption, not the end user.
@@ -767,7 +783,14 @@ app.post('/v1/chat/completions', async (req, res) => {
         };
 
         // Parse <tool_call> blocks from Claude's response
-        const toolCalls = parseToolCalls(finalText || '');
+        const parsedToolCalls = parseToolCalls(finalText || '');
+        const availableToolNames = getAvailableToolNames(tools);
+        const { valid: toolCalls, invalid: invalidToolCalls } = filterToolCalls(parsedToolCalls, availableToolNames);
+        if (invalidToolCalls.length > 0) {
+            console.warn(`[${requestId}] filtered unavailable tool_calls: [${invalidToolCalls.map(tc => tc.name).join(', ')}]`);
+            pushActivity(requestId, `filtered unavailable tool_calls: [${invalidToolCalls.map(tc => tc.name).join(', ')}]`);
+            logEntry.activity.push(`filtered unavailable tool_calls: [${invalidToolCalls.map(tc => tc.name).join(', ')}]`);
+        }
 
         if (toolCalls.length > 0) {
             // Claude requested tools → return as OpenAI tool_calls for OC to execute
@@ -784,17 +807,9 @@ app.post('/v1/chat/completions', async (req, res) => {
             console.log(`[${requestId}] sessionMap: stored ${toolCalls.length} tool_call_ids for session=${sessionId.slice(0, 8)} (total=${sessionMap.size})`);
 
             if (isStream) {
-                // Send any text before tool calls
-                if (textBeforeTools) {
-                    const textChunk = {
-                        id: completionId, object: 'chat.completion.chunk',
-                        created: Math.floor(Date.now() / 1000), model,
-                        choices: [{ index: 0, delta: { role: 'assistant', content: textBeforeTools }, finish_reason: null }],
-                    };
-                    res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
-                }
-
-                // Send tool_calls delta
+                // Suppress any partial assistant prose before tool calls.
+                // Tool-use turns should only surface the tool_calls payload until
+                // the loop completes and a final verified reply is ready.
                 const tcDelta = {
                     id: completionId, object: 'chat.completion.chunk',
                     created: Math.floor(Date.now() / 1000), model,
@@ -832,7 +847,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                     created: Math.floor(Date.now() / 1000), model,
                     choices: [{ index: 0, message: {
                         role: 'assistant',
-                        content: textBeforeTools || null,
+                        content: null,
                         tool_calls: toolCalls.map((tc, i) => ({
                             id: tc.id, index: i, type: 'function',
                             function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
