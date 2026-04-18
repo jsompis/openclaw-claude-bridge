@@ -354,10 +354,10 @@ app.get('/v1/models', (req, res) => {
     res.json({
         object: 'list',
         data: [
-            { id: 'claude-opus-latest',   object: 'model', created: 1700000000, owned_by: 'anthropic' },
-            { id: 'claude-opus-4-7',      object: 'model', created: 1700000000, owned_by: 'anthropic' },
-            { id: 'claude-sonnet-latest', object: 'model', created: 1700000000, owned_by: 'anthropic' },
-            { id: 'claude-haiku-latest',  object: 'model', created: 1700000000, owned_by: 'anthropic' },
+            { id: 'claude-opus-4-7',   object: 'model', created: 1700000000, owned_by: 'anthropic' },
+            { id: 'claude-opus-4-6',   object: 'model', created: 1700000000, owned_by: 'anthropic' },
+            { id: 'claude-sonnet-4-6', object: 'model', created: 1700000000, owned_by: 'anthropic' },
+            { id: 'claude-haiku-4-5',  object: 'model', created: 1700000000, owned_by: 'anthropic' },
         ],
     });
 });
@@ -404,7 +404,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     pushLog(logEntry); // appear in dashboard immediately as 'pending'
 
     try {
-        const { messages = [], tools = [], model = 'claude-opus-latest', stream = true, reasoning_effort } = req.body;
+        const { messages = [], tools = [], model = 'claude-opus-4-7', stream = true, reasoning_effort } = req.body;
         stats.lastModel = model;
         logEntry.model = model;
         logEntry.contextWindow = getContextWindow(model);
@@ -972,10 +972,10 @@ statusApp.get('/status', (req, res) => {
             age: Math.floor((Date.now() - val.createdAt) / 1000),
         })),
         contextWindows: {
-            'claude-opus-latest': getContextWindow('claude-opus-latest'),
             'claude-opus-4-7': getContextWindow('claude-opus-4-7'),
-            'claude-sonnet-latest': getContextWindow('claude-sonnet-latest'),
-            'claude-haiku-latest': getContextWindow('claude-haiku-latest'),
+            'claude-opus-4-6': getContextWindow('claude-opus-4-6'),
+            'claude-sonnet-4-6': getContextWindow('claude-sonnet-4-6'),
+            'claude-haiku-4-5': getContextWindow('claude-haiku-4-5'),
         },
         activity: globalActivity.slice(-30),
         log: [...requestLog].reverse(),

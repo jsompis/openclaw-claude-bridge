@@ -48,16 +48,14 @@ setInterval(() => {
 
 /**
  * Map OpenClaw model IDs to Claude CLI model names.
- * Uses CLI aliases (opus/sonnet/haiku) by default so we always get the latest
- * model without code changes.  Override via env vars in .env if needed,
- * e.g. OPUS_MODEL=opus[1m] when 1M context becomes available.
+ * Exposes explicit Anthropic-style model ids.
  */
 function resolveModel(modelId) {
     const modelMap = {
-        'claude-opus-latest':    process.env.OPUS_MODEL   || 'opus',
-        'claude-opus-4-7':       process.env.OPUS_47_MODEL || 'claude-opus-4-7',
-        'claude-sonnet-latest':  process.env.SONNET_MODEL || 'sonnet',
-        'claude-haiku-latest':   process.env.HAIKU_MODEL  || 'haiku',
+        'claude-opus-4-7':      process.env.OPUS_47_MODEL || 'claude-opus-4-7',
+        'claude-opus-4-6':      process.env.OPUS_MODEL || 'claude-opus-4-6',
+        'claude-sonnet-4-6':    process.env.SONNET_MODEL || 'claude-sonnet-4-6',
+        'claude-haiku-4-5':     process.env.HAIKU_MODEL || 'claude-haiku-4-5',
     };
     return modelMap[modelId] || modelId;
 }
@@ -65,7 +63,12 @@ function resolveModel(modelId) {
 /** Context window size per model, derived from the resolved CLI model name. */
 function getContextWindow(modelId) {
     const resolved = resolveModel(modelId);
-    return resolved.includes('[1m]') ? 1_000_000 : 200_000;
+    return (
+        modelId === 'claude-opus-4-7' ||
+        modelId === 'claude-opus-4-6' ||
+        modelId === 'claude-sonnet-4-6' ||
+        resolved.includes('[1m]')
+    ) ? 1_000_000 : 200_000;
 }
 
 /**
