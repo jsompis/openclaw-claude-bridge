@@ -26,3 +26,6 @@ SECURITY-AUDIT.md
 # Internal docs — design notes, not for public
 docs/internal/
 CLAUDE.md
+
+.runtime-backups/
+state.json.bak.*
