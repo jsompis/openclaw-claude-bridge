@@ -208,6 +208,34 @@ function extractAgentName(messages) {
     return null;
 }
 
+function messageText(msg) {
+    if (!msg) return '';
+    if (typeof msg.content === 'string') return msg.content;
+    if (Array.isArray(msg.content)) {
+        return msg.content
+            .filter(p => p && (p.type === 'text' || typeof p.text === 'string'))
+            .map(p => p.text || '')
+            .join('\n');
+    }
+    return '';
+}
+
+/**
+ * OpenClaw sometimes asks the configured model for a short session filename slug.
+ * That request can include Discord metadata and tools, so if it is proxied into a
+ * per-channel Claude CLI session it poisons the channel: future real prompts resume
+ * a title-generation conversation and Claude replies with the slug forever.
+ * Intercept it before session routing and do not store channelMap/responseMap state.
+ */
+function isSessionTitleSlugRequest(messages) {
+    return messages.some((msg) => {
+        if (msg.role !== 'user') return false;
+        const text = messageText(msg).trim();
+        return /^(?:User:\s*)?Based on this conversation, generate a short 1-2 word filename slug\b/i.test(text)
+            || /generate a short 1-2 word filename slug \(lowercase, hyphen-separated, no file extension\)/i.test(text);
+    });
+}
+
 /**
  * Detect if this is a new OC session (has "✅ New session started" marker
  * as the FIRST assistant/previous_response content, with no other assistant messages we recognise).
@@ -341,6 +369,24 @@ app.post('/v1/chat/completions', async (req, res) => {
         logEntry.effort = reasoning_effort || null;
         logEntry.thinking = !!reasoning_effort;
         if (reasoning_effort) console.log(`[${requestId}] reasoning_effort=${reasoning_effort}`);
+
+        if (isSessionTitleSlugRequest(messages)) {
+            const promptLen = messages.reduce((s, m) => s + messageText(m).length, 0);
+            console.warn(`[${requestId}] SESSION TITLE intercepted: tools=${tools.length} promptLen≈${promptLen}, returning NO_REPLY without session routing`);
+            logEntry.status = 'ok';
+            logEntry.resumeMethod = 'session_title_intercept';
+            logEntry.promptLen = promptLen;
+            logEntry.durationMs = Date.now() - startTime;
+            pushActivity(requestId, '🏷️ session title intercepted');
+            return res.json({
+                id: `chatcmpl-${requestId}`,
+                object: 'chat.completion',
+                created: Math.floor(Date.now() / 1000),
+                model,
+                choices: [{ index: 0, message: { role: 'assistant', content: 'NO_REPLY' }, finish_reason: 'stop' }],
+                usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+            });
+        }
 
         const allowedToolNames = new Set(tools.map(t => t.function?.name || t.name).filter(Boolean));
         if (tools.length > 0) {
