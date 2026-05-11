@@ -29,3 +29,4 @@ CLAUDE.md
 
 .runtime-backups/
 state.json.bak.*
+state/

@@ -547,6 +547,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                         logEntry.resumeMethod = 'refresh';
                         logEntry.refreshPrompt = compactResult.promptText;
                         logEntry.refreshSystemPrompt = compactResult.systemPrompt;
+                        logEntry.refreshAttachmentBlocks = compactResult.attachmentBlocks || [];
                         logEntry.pendingCompactionHash = compactionHash;
                         purgeCliSession(oldSid);
                         channelMap.delete(routingKey);
@@ -562,6 +563,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         let promptText;
         let combinedSystemPrompt;
         let sessionId;
+        let attachmentBlocks = [];
 
         // Always build system prompt (not persisted in CLI session)
         const { systemPrompt: devSystemPrompt } = convertMessages(messages);
@@ -574,25 +576,29 @@ app.post('/v1/chat/completions', async (req, res) => {
             // Resume mode: only send new messages as prompt
             sessionId = resumeSessionId;
             // 1) Try tool loop extraction (messages after last assistant tool_calls)
-            const newText = extractNewMessages(messages);
+            const newToolLoop = extractNewMessages(messages);
             // 2) Try conversation continuation (messages after last assistant message)
-            const newUserText = !newText ? extractNewUserMessages(messages) : null;
-            if (newText) {
-                promptText = newText;
+            const newCont = !newToolLoop ? extractNewUserMessages(messages) : null;
+            if (newToolLoop) {
+                promptText = newToolLoop.newText;
+                attachmentBlocks = newToolLoop.attachmentBlocks || [];
                 logEntry.resumeMethod = 'tool_loop';
-                console.log(`[${requestId}] RESUME session=${sessionId.slice(0, 8)} newPromptLen=${promptText.length} (tool loop)`);
+                console.log(`[${requestId}] RESUME session=${sessionId.slice(0, 8)} newPromptLen=${promptText.length} (tool loop)${attachmentBlocks.length ? ` +${attachmentBlocks.length} attachment(s)` : ''}`);
                 pushActivity(requestId, `🔄 resuming session (${promptText.length} chars new)`);
-            } else if (newUserText) {
-                promptText = newUserText;
+            } else if (newCont) {
+                promptText = newCont.newText;
+                attachmentBlocks = newCont.attachmentBlocks || [];
                 logEntry.resumeMethod = 'continuation';
-                console.log(`[${requestId}] RESUME session=${sessionId.slice(0, 8)} newPromptLen=${promptText.length} (continuation)`);
+                console.log(`[${requestId}] RESUME session=${sessionId.slice(0, 8)} newPromptLen=${promptText.length} (continuation)${attachmentBlocks.length ? ` +${attachmentBlocks.length} attachment(s)` : ''}`);
                 pushActivity(requestId, `🔄 resuming session (${promptText.length} chars new)`);
             } else {
                 // Fallback: nothing new to send, use full history as new session
                 logEntry.resumeMethod = 'fallback';
                 isResume = false;
                 sessionId = uuidv4();
-                promptText = convertMessages(messages).promptText;
+                const full = convertMessages(messages);
+                promptText = full.promptText;
+                attachmentBlocks = full.attachmentBlocks || [];
                 console.log(`[${requestId}] RESUME fallback → new session=${sessionId.slice(0, 8)}`);
                 pushActivity(requestId, `⏳ thinking... (${tools.length} tools) [resume fallback]`);
             }
@@ -605,12 +611,16 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (refreshSys) {
                     combinedSystemPrompt = `${refreshSys}${toolInstructions}`;
                 }
+                attachmentBlocks = logEntry.refreshAttachmentBlocks || [];
                 delete logEntry.refreshPrompt;
                 delete logEntry.refreshSystemPrompt;
+                delete logEntry.refreshAttachmentBlocks;
                 console.log(`[${requestId}] NEW session=${sessionId.slice(0, 8)} (context refresh)`);
                 pushActivity(requestId, `🔄 context refresh → new session (${promptText.length} chars)`);
             } else {
-                promptText = convertMessages(messages).promptText;
+                const full = convertMessages(messages);
+                promptText = full.promptText;
+                attachmentBlocks = full.attachmentBlocks || [];
                 console.log(`[${requestId}] NEW session=${sessionId.slice(0, 8)}`);
                 pushActivity(requestId, `⏳ thinking... (${tools.length} tools)`);
             }
@@ -664,7 +674,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         let finalText;
         let finalUsage = { input_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 0, cost_usd: 0 };
         try {
-            ({ text: finalText, usage: finalUsage } = await runClaude(combinedSystemPrompt, promptText, model, onChunk, ac.signal, reasoning_effort, sessionId, isResume));
+            ({ text: finalText, usage: finalUsage } = await runClaude(combinedSystemPrompt, promptText, model, onChunk, ac.signal, reasoning_effort, sessionId, isResume, attachmentBlocks));
         } catch (err) {
             const errMessage = err?.message || 'Unknown Claude error';
             const emptyCompletion = /empty response/i.test(errMessage);
@@ -704,11 +714,12 @@ app.post('/v1/chat/completions', async (req, res) => {
                     if (compactResult.systemPrompt) {
                         combinedSystemPrompt = `${compactResult.systemPrompt}${toolInstructions}`;
                     }
+                    attachmentBlocks = compactResult.attachmentBlocks || [];
                 }
                 logEntry.promptLen = promptText.length;
                 console.log(`[${requestId}] Retry path: new session=${sessionId.slice(0, 8)} promptLen=${promptText.length}`);
                 try {
-                    ({ text: finalText, usage: finalUsage } = await runClaude(combinedSystemPrompt, promptText, model, onChunk, ac.signal, reasoning_effort, sessionId, false));
+                    ({ text: finalText, usage: finalUsage } = await runClaude(combinedSystemPrompt, promptText, model, onChunk, ac.signal, reasoning_effort, sessionId, false, attachmentBlocks));
                 } catch (retryErr) {
                     console.error(`[${requestId}] Retry also failed: ${retryErr.message}`);
                     logEntry.status = 'error';

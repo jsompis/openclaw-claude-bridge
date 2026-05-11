@@ -199,7 +199,7 @@ function restoreInbound(text, alias, aliasLower, sessionId) {
     return text;
 }
 
-function runClaude(systemPrompt, promptText, modelId, onChunk, signal, reasoningEffort, sessionId, isResume) {
+function runClaude(systemPrompt, promptText, modelId, onChunk, signal, reasoningEffort, sessionId, isResume, attachmentBlocks) {
     // Stable alias per session — see getSessionAlias() above.
     const { alias, aliasLower } = getSessionAlias(sessionId);
     if (systemPrompt) {
@@ -212,12 +212,19 @@ function runClaude(systemPrompt, promptText, modelId, onChunk, signal, reasoning
     return new Promise((resolve, reject) => {
         const model = resolveModel(modelId);
 
+        // Stream-json input mode is required when we have attachment blocks
+        // (images/PDFs) — the CLI doesn't accept attachments in text mode.
+        const hasAttachments = Array.isArray(attachmentBlocks) && attachmentBlocks.length > 0;
+
         const args = [
             '--print',
             '--dangerously-skip-permissions',
             '--output-format', 'stream-json',
             '--verbose',
         ];
+        if (hasAttachments) {
+            args.push('--input-format', 'stream-json');
+        }
 
         // Always pass --model (not persisted in session)
         args.push('--model', model);
@@ -291,7 +298,29 @@ function runClaude(systemPrompt, promptText, modelId, onChunk, signal, reasoning
         const hardTimer = setTimeout(() => kill(`Hard timeout (${MAX_RUN_MS / 60000}min)`), MAX_RUN_MS);
 
         // Write conversation to stdin
-        proc.stdin.write(promptText);
+        if (hasAttachments) {
+            // Stream-json input: one user message with text + image/document blocks.
+            // The prior conversation transcript is embedded as a single big text
+            // block; the attachments come last so they're clearly the "current"
+            // input the user is asking about.
+            const contentBlocks = [];
+            if (promptText) {
+                contentBlocks.push({ type: 'text', text: promptText });
+            }
+            for (const b of attachmentBlocks) {
+                contentBlocks.push(b);
+            }
+            const streamMsg = {
+                type: 'user',
+                message: {
+                    role: 'user',
+                    content: contentBlocks,
+                },
+            };
+            proc.stdin.write(JSON.stringify(streamMsg) + '\n');
+        } else {
+            proc.stdin.write(promptText);
+        }
         proc.stdin.end();
 
         let fullText = '';
