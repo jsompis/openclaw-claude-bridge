@@ -361,7 +361,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     pushLog(logEntry); // appear in dashboard immediately as 'pending'
 
     try {
-        const { messages = [], tools = [], model = 'claude-opus-4-7', stream = true, reasoning_effort } = req.body;
+        const { messages = [], tools = [], model = 'claude-opus-4-7', stream = true, reasoning_effort, user } = req.body;
         stats.lastModel = model;
         logEntry.model = model;
         logEntry.contextWindow = getContextWindow(model);
@@ -425,12 +425,18 @@ app.post('/v1/chat/completions', async (req, res) => {
         let isResume = false;
         let resumeSessionId = null;
 
-        // Extract OC conversation identity + agent name
+        // Extract conversation identity.
+        // Priority:
+        // 1. OpenClaw-style conversation metadata + agent name, for multi-agent channels.
+        // 2. OpenAI-compatible `user` field, for OpenAI clients and raw API tests.
+        // Without the `user` fallback, plain OpenAI requests never hit channelMap and
+        // every turn starts a fresh Claude CLI session.
         const convLabel = extractConversationLabel(messages);
         const agentName = extractAgentName(messages);
+        const openAiUser = typeof user === 'string' && user.trim() ? user.trim() : null;
         const routingKey = convLabel
             ? (agentName ? `${convLabel}::${agentName}` : convLabel)
-            : null;
+            : (openAiUser ? `openai-user:${openAiUser}` : null);
         if (routingKey) {
             console.log(`[${requestId}] OC channel: "${convLabel}" agent: "${agentName || '(none)'}" routingKey: "${routingKey}"`);
         }
@@ -591,6 +597,18 @@ app.post('/v1/chat/completions', async (req, res) => {
                 logEntry.resumeMethod = 'continuation';
                 console.log(`[${requestId}] RESUME session=${sessionId.slice(0, 8)} newPromptLen=${promptText.length} (continuation)${attachmentBlocks.length ? ` +${attachmentBlocks.length} attachment(s)` : ''}`);
                 pushActivity(requestId, `🔄 resuming session (${promptText.length} chars new)`);
+            } else if (routingKey && !messages.some(m => m.role === 'assistant')) {
+                // OpenAI-compatible clients often send only the latest user message
+                // while relying on the `user` routing key for continuity. In that
+                // shape there is no assistant anchor for extractNewUserMessages(),
+                // but we still should resume the mapped Claude CLI session and send
+                // the current user turn.
+                const full = convertMessages(messages);
+                promptText = full.promptText;
+                attachmentBlocks = full.attachmentBlocks || [];
+                logEntry.resumeMethod = 'user_key_continuation';
+                console.log(`[${requestId}] RESUME session=${sessionId.slice(0, 8)} promptLen=${promptText.length} (user key continuation)`);
+                pushActivity(requestId, `🔄 resuming session (${promptText.length} chars via user key)`);
             } else {
                 // Fallback: nothing new to send, use full history as new session
                 logEntry.resumeMethod = 'fallback';
@@ -982,8 +1000,10 @@ statusApp.post('/cleanup', (req, res) => {
     res.json(result);
 });
 
-// SPA fallback — serve index.html for any non-API route
-statusApp.get('*', (req, res) => {
+// SPA fallback — serve index.html for any non-API route. Express 5 uses
+// path-to-regexp v8, where bare '*' is invalid; use middleware as the
+// catch-all instead.
+statusApp.use((req, res) => {
     res.sendFile(path.join(__dirname, '../dashboard/dist/index.html'));
 });
 
