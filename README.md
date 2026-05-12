@@ -205,8 +205,8 @@ Add this provider to your OpenClaw config (`~/.openclaw/openclaw.json`):
             "id": "claude-haiku-4-5",
             "name": "Claude Haiku 4.5",
             "contextWindow": 200000,
-            "maxTokens": 32000,
-            "reasoning": true
+            "maxTokens": 8192,
+            "reasoning": false
           }
         ]
       }

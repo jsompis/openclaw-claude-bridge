@@ -204,8 +204,8 @@ Dashboard 詳細架構請參閱 [docs/architecture.md](docs/architecture.md#dash
             "id": "claude-haiku-4-5",
             "name": "Claude Haiku 4.5",
             "contextWindow": 200000,
-            "maxTokens": 32000,
-            "reasoning": true
+            "maxTokens": 8192,
+            "reasoning": false
           }
         ]
       }
