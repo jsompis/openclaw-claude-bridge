@@ -1,4 +1,20 @@
-# openclaw-claude-bridge
+# openclaw-claude-bridge (Kyzcreig fork)
+
+> ## ⚠️ DEPRECATED — superseded by [Kyzcreig/claude-bridge](https://github.com/Kyzcreig/claude-bridge)
+>
+> This fork has been consolidated into the canonical [`Kyzcreig/claude-bridge`](https://github.com/Kyzcreig/claude-bridge) repo as of **2026-05-11**. The new repo is config-driven: a single codebase serves both the OpenClaw deployment and the Hermes deployment via JSON brand profiles.
+>
+> **For new work**, use `Kyzcreig/claude-bridge` with `~/.config/claude-bridge/openclaw.config.json`.
+>
+> **For rollback**, this repo remains intact at tag `v0-final-legacy` (= commit [`0059621`](https://github.com/Kyzcreig/openclaw-claude-bridge/commit/0059621)). Forge's `com.openclaw.claude-bridge` launchd plist was migrated on 2026-05-11; the legacy plist is preserved at `~/Library/LaunchAgents/com.openclaw.claude-bridge.plist.legacy-backup` for one-step rollback.
+>
+> **Upstream** ([`shinglokto/openclaw-claude-bridge`](https://github.com/shinglokto/openclaw-claude-bridge)) is unaffected — this deprecation only applies to the `Kyzcreig/` fork. The canonical `Kyzcreig/claude-bridge` still tracks `shinglokto/openclaw-claude-bridge` as `upstream` for rebases.
+>
+> **Archive timeline:** ~30–60 days of clean canonical runtime, then this repo will be archived on GitHub (not deleted — archive preserves history and stops accidental contributions).
+>
+> See Obsidian: `AI/Claude Bridge — Consolidation Proposal 2026-05-11.md`.
+
+---
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
