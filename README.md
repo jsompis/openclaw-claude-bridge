@@ -1,18 +1,8 @@
-# openclaw-claude-bridge (Kyzcreig fork)
+# openclaw-claude-bridge
 
-> ## ⚠️ DEPRECATED — superseded by [Kyzcreig/claude-bridge](https://github.com/Kyzcreig/claude-bridge)
+> ## Active OpenClaw fork
 >
-> This fork has been consolidated into the canonical [`Kyzcreig/claude-bridge`](https://github.com/Kyzcreig/claude-bridge) repo as of **2026-05-11**. The new repo is config-driven: a single codebase serves both the OpenClaw deployment and the Hermes deployment via JSON brand profiles.
->
-> **For new work**, use `Kyzcreig/claude-bridge` with `~/.config/claude-bridge/openclaw.config.json`.
->
-> **For rollback**, this repo remains intact at tag `v0-final-legacy` (= commit [`0059621`](https://github.com/Kyzcreig/openclaw-claude-bridge/commit/0059621)). Forge's `com.openclaw.claude-bridge` launchd plist was migrated on 2026-05-11; the legacy plist is preserved at `~/Library/LaunchAgents/com.openclaw.claude-bridge.plist.legacy-backup` for one-step rollback.
->
-> **Upstream** ([`shinglokto/openclaw-claude-bridge`](https://github.com/shinglokto/openclaw-claude-bridge)) is unaffected — this deprecation only applies to the `Kyzcreig/` fork. The canonical `Kyzcreig/claude-bridge` still tracks `shinglokto/openclaw-claude-bridge` as `upstream` for rebases.
->
-> **Archive timeline:** ~30–60 days of clean canonical runtime, then this repo will be archived on GitHub (not deleted — archive preserves history and stops accidental contributions).
->
-> See Obsidian: `AI/Claude Bridge — Consolidation Proposal 2026-05-11.md`.
+> This repository is the active OpenClaw-specific Claude bridge fork used for OpenClaw session routing, resume behavior, and dashboard diagnostics. Generic upstream bridge work may still live in other forks, but OpenClaw-specific fixes such as `x-openclaw-session-key` routing belong here.
 
 ---
 
