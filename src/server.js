@@ -227,7 +227,7 @@ function extractConversationLabel(messages) {
  * The trusted inbound metadata block is still present in prompt context, so use
  * it as a bridge-owned fallback instead of starting a fresh Claude session.
  */
-function extractInboundContextLabel(messages) {
+function extractInboundContext(messages) {
     for (const msg of messages) {
         if (!['user', 'developer', 'system'].includes(msg.role)) continue;
         const content = messageContentText(msg);
@@ -241,7 +241,8 @@ function extractInboundContextLabel(messages) {
             const provider = typeof meta.provider === 'string' && meta.provider.trim() ? meta.provider.trim() : null;
             const surface = typeof meta.surface === 'string' && meta.surface.trim() ? meta.surface.trim() : null;
             const parts = [channel || provider || surface, chatType, account].filter(Boolean);
-            return parts.length ? parts.join(':') : null;
+            const label = parts.length ? parts.join(':') : null;
+            return { label, channel, chatType, account, provider, surface };
         } catch {}
     }
     return null;
@@ -487,7 +488,8 @@ app.post('/v1/chat/completions', async (req, res) => {
         // 4. OpenAI-compatible `user` field, for OpenAI clients and raw API tests.
         // Without these stable fallbacks, every turn starts a fresh Claude CLI session.
         const convLabel = extractConversationLabel(messages);
-        const inboundLabel = extractInboundContextLabel(messages);
+        const inboundContext = extractInboundContext(messages);
+        const inboundLabel = inboundContext?.label || null;
         const agentName = extractAgentName(messages);
         const openAiUser = typeof user === 'string' && user.trim() ? user.trim() : null;
         let routingSource = null;
@@ -719,7 +721,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         logEntry.promptLen = promptText.length;
         logEntry.cliSessionId = sessionId.slice(0, 8);
         logEntry.resumed = isResume;
-        const displayChannel = convLabel || (routingSource === 'openclawSessionKey' ? `session:${ocSessionKey}` : null) || (routingSource === 'inboundContext' ? inboundLabel : null) || (routingSource === 'openAiUser' ? `user:${openAiUser}` : null);
+        const displayChannel = convLabel || (routingSource === 'openclawSessionKey' ? `session:${ocSessionKey}` : null) || (routingSource === 'inboundContext' ? (inboundContext?.channel || inboundLabel) : null) || (routingSource === 'openAiUser' ? `user:${openAiUser}` : null);
         logEntry.channel = displayChannel ? displayChannel.replace(/^Guild\s+/, '').slice(0, 40) : null;
         logEntry.agent = agentName || null;
         console.log(`[${requestId}] model=${model} tools=${tools.length} promptLen=${promptText.length} resume=${isResume}`);
