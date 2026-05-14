@@ -1046,19 +1046,33 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 });
 
-// ─── Status app (port 3458, all interfaces) ───────────────────────────────────
+// ─── Status app (port 3458, default localhost; bind controlled in index.js) ───
 const statusApp = express();
 
 statusApp.use(express.json());
 
-// Dashboard password protection (Basic Auth)
+// Dashboard password protection (Basic Auth).
+// When DASHBOARD_PASS is set, every status/dashboard route requires the header.
+// When it is not set, the dashboard relies on localhost-only bind for safety
+// (index.js refuses to bind a non-loopback interface without a password).
 const DASHBOARD_PASS = process.env.DASHBOARD_PASS;
-if (DASHBOARD_PASS) {
+const hasDashboardAuth = !!DASHBOARD_PASS;
+if (hasDashboardAuth) {
     const expected = 'Basic ' + Buffer.from('admin:' + DASHBOARD_PASS).toString('base64');
     statusApp.use((req, res, next) => {
         if (req.headers.authorization === expected) return next();
         res.setHeader('WWW-Authenticate', 'Basic realm="Dashboard"');
         res.status(401).send('Unauthorized');
+    });
+}
+
+// Destructive routes (/cleanup) always require Basic Auth, regardless of bind.
+// Without DASHBOARD_PASS the route is disabled (use the CLI instead).
+function requireDashboardAuth(req, res, next) {
+    if (hasDashboardAuth) return next();
+    res.status(403).json({
+        error: 'dashboard_password_required',
+        message: 'Set DASHBOARD_PASS to enable this endpoint. Without a password the dashboard is read-only and bound to localhost.',
     });
 }
 
@@ -1093,7 +1107,7 @@ statusApp.get('/status', (req, res) => {
     });
 });
 
-statusApp.post('/cleanup', (req, res) => {
+statusApp.post('/cleanup', requireDashboardAuth, (req, res) => {
     const result = cleanupSessions(); // default: delete sessions older than 24h
     console.log(`[openclaw-claude-bridge] Manual cleanup: deleted ${result.deleted}, remaining ${result.remaining}`);
     res.json(result);

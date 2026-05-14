@@ -6,7 +6,10 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node scripts/test-tool-parser.js",
+    "test": "node scripts/test-tool-parser.js && node scripts/test-routing.js && node scripts/test-security.js",
+    "test:tool-parser": "node scripts/test-tool-parser.js",
+    "test:routing": "node scripts/test-routing.js",
+    "test:security": "node scripts/test-security.js",
     "postinstall": "cd dashboard && npm install --ignore-scripts && npm run build"
   },
   "license": "MIT",
