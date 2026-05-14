@@ -1,276 +1,50 @@
 'use strict';
 
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+
 const { convertMessages, convertMessagesCompact, extractNewMessages, extractNewUserMessages } = require('./convert');
 const { buildToolInstructions } = require('./tools');
-const { runClaude, getContextWindow, clearSessionAlias } = require('./claude');
+const { runClaude } = require('./claude');
 const { cleanResponseText, hasInternalBridgeMarkup, parseToolCallsDetailed, redactSensitivePreview } = require('./tool-parser');
 
-// --- Session cleanup ---
-// Claude CLI subprocess runs with cwd=/tmp. On macOS /tmp → /private/tmp,
-// so Claude CLI creates sessions in -private-tmp instead of -tmp.
-// Use fs.realpathSync to resolve the symlink and match what Claude CLI does.
-const SESSIONS_DIR = path.join(
-    process.env.HOME,
-    '.claude/projects',
-    '-' + fs.realpathSync('/tmp').replace(/\//g, '-').replace(/^-/, '')
-);
-const CLEANUP_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 1 day
+const {
+    extractRoutingSignals,
+    pickRouting,
+    MAIN_PRIORITY,
+    MEMFLUSH_PRIORITY,
+    headerValue,
+    debugRawRequest,
+    messageText,
+} = require('./routing');
 
-function cleanupSessions(maxAgeMs = CLEANUP_MAX_AGE_MS) {
-    try {
-        if (!fs.existsSync(SESSIONS_DIR)) return { deleted: 0, remaining: 0 };
-        const files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.jsonl'));
-        const cutoff = Date.now() - maxAgeMs;
-        let deleted = 0;
-        for (const file of files) {
-            const fp = path.join(SESSIONS_DIR, file);
-            try {
-                const stat = fs.statSync(fp);
-                if (stat.mtimeMs < cutoff) { fs.unlinkSync(fp); deleted++; }
-            } catch {}
-        }
-        const remaining = files.length - deleted;
-        return { deleted, remaining };
-    } catch { return { deleted: 0, remaining: 0, error: 'failed' }; }
-}
+const {
+    MAX_PER_CHANNEL,
+    MAX_GLOBAL,
+    stats,
+    channelMap,
+    sessionMap,
+    responseMap,
+    channelActive,
+    pushLog,
+    pushActivity,
+    contentKey,
+    gcMemory,
+    purgeCliSession,
+    saveState,
+} = require('./state-store');
 
-// Cache session info to avoid sync I/O on every dashboard poll
-let _sessionCache = { data: { count: 0, sizeKB: 0 }, ts: 0 };
-function getSessionInfo() {
-    if (Date.now() - _sessionCache.ts < 10000) return _sessionCache.data; // 10s TTL
-    try {
-        if (!fs.existsSync(SESSIONS_DIR)) { _sessionCache = { data: { count: 0, sizeKB: 0 }, ts: Date.now() }; return _sessionCache.data; }
-        const files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.jsonl'));
-        let totalSize = 0;
-        for (const file of files) {
-            try { totalSize += fs.statSync(path.join(SESSIONS_DIR, file)).size; } catch {}
-        }
-        _sessionCache = { data: { count: files.length, sizeKB: Math.round(totalSize / 1024) }, ts: Date.now() };
-        return _sessionCache.data;
-    } catch { return { count: 0, sizeKB: 0 }; }
-}
+const {
+    buildUsagePayload,
+    writeSseChunk,
+    writeToolCallsStream,
+    writeStopStream,
+    buildToolCallsNonStream,
+    buildTextNonStream,
+} = require('./openai-response');
 
-// Auto-cleanup on startup
-const startupCleanup = cleanupSessions();
-if (startupCleanup.deleted > 0) {
-    console.log(`[openclaw-claude-bridge] Startup cleanup: deleted ${startupCleanup.deleted} old sessions, ${startupCleanup.remaining} remaining`);
-}
-
-// --- Persistence ---
-const STATE_FILE = path.join(__dirname, '..', 'state.json');
-
-function saveState() {
-    try {
-        const data = {
-            stats: { totalRequests: stats.totalRequests, errors: stats.errors },
-            channelMap: Array.from(channelMap.entries()),
-            responseMap: Array.from(responseMap.entries()),
-            requestLog,
-            globalActivity,
-        };
-        const tmp = STATE_FILE + '.tmp';
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, STATE_FILE);
-    } catch (err) {
-        console.warn(`[persist] Failed to save state: ${err.message}`);
-    }
-}
-
-/** Check if a CLI session file still exists on disk. */
-function sessionFileExists(sessionId) {
-    return fs.existsSync(path.join(SESSIONS_DIR, `${sessionId}.jsonl`));
-}
-
-function loadState() {
-    try {
-        if (!fs.existsSync(STATE_FILE)) return;
-        const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-
-        // Restore stats (cumulative counters only)
-        if (data.stats) {
-            stats.totalRequests = data.stats.totalRequests || 0;
-            stats.errors = data.stats.errors || 0;
-        }
-
-        // Restore channelMap — only if CLI session file still exists
-        let restored = 0, pruned = 0;
-        if (data.channelMap) {
-            for (const [key, val] of data.channelMap) {
-                if (sessionFileExists(val.sessionId)) {
-                    channelMap.set(key, val);
-                    restored++;
-                } else {
-                    pruned++;
-                }
-            }
-        }
-
-        // Restore responseMap — only if CLI session file still exists
-        if (data.responseMap) {
-            for (const [key, val] of data.responseMap) {
-                if (sessionFileExists(val.sessionId)) {
-                    responseMap.set(key, val);
-                }
-            }
-        }
-
-        // Restore requestLog
-        if (data.requestLog) {
-            requestLog.push(...data.requestLog.slice(-MAX_LOG));
-        }
-
-        // Restore globalActivity
-        if (data.globalActivity) {
-            globalActivity.push(...data.globalActivity.slice(-MAX_ACTIVITY));
-        }
-
-        console.log(`[persist] Loaded: ${restored} channels, ${pruned} pruned (session gone), ${requestLog.length} log entries, ${globalActivity.length} activity`);
-    } catch (err) {
-        console.warn(`[persist] Failed to load state: ${err.message}`);
-    }
-}
-
-// --- Shared state ---
-const stats = {
-    startedAt: new Date(),
-    totalRequests: 0,
-    activeRequests: 0,
-    lastRequestAt: null,
-    lastModel: null,
-    errors: 0,
-};
-
-// --- Session reuse tracking ---
-// Primary: Maps OC conversation label → { sessionId, createdAt }
-const channelMap = new Map();
-// Maps tool_call_id → { sessionId, createdAt } for tool loop resume
-const sessionMap = new Map();
-// Maps response content key → { sessionId, createdAt } for non-tool-call resume (fallback for DMs)
-const responseMap = new Map();
-// Memory cleanup TTL (not for session lifecycle — just garbage collection)
-const MEMORY_GC_TTL_MS = 60 * 60 * 1000; // 1 hour
-
-// Per-channel concurrent request limit (prevents bug loops while allowing multi-channel usage)
-const MAX_PER_CHANNEL = parseInt(process.env.MAX_PER_CHANNEL) || 2;
-const MAX_GLOBAL = parseInt(process.env.MAX_GLOBAL) || 20;
-const channelActive = new Map(); // channel → count of in-flight requests
-
-/** First 200 chars of text as a lookup key. */
-function contentKey(text) {
-    if (!text) return null;
-    return text.slice(0, 200);
-}
-
-function headerValue(value) {
-    if (Array.isArray(value)) return value.find(v => typeof v === 'string' && v.trim())?.trim() || null;
-    return typeof value === 'string' && value.trim() ? value.trim() : null;
-}
-
-function debugRawRequest(requestId, req, messages) {
-    if (process.env.CLAUDE_BRIDGE_DEBUG_RAW_REQUEST !== '1') return;
-    try {
-        const headers = {};
-        for (const key of ['x-openclaw-session-key', 'user-agent', 'content-type']) {
-            if (req.headers[key]) headers[key] = headerValue(req.headers[key]) || String(req.headers[key]);
-        }
-        const sample = {
-            headers,
-            user: typeof req.body?.user === 'string' ? req.body.user.slice(0, 120) : null,
-            prompt_cache_key: typeof req.body?.prompt_cache_key === 'string' ? req.body.prompt_cache_key.slice(0, 120) : null,
-            messages: (messages || []).slice(0, 6).map((m) => ({
-                role: m.role,
-                text: messageContentText(m).slice(0, 500),
-            })),
-        };
-        console.warn(`[${requestId}] DEBUG_RAW_REQUEST ${JSON.stringify(sample)}`);
-    } catch (err) {
-        console.warn(`[${requestId}] DEBUG_RAW_REQUEST failed: ${err?.message || err}`);
-    }
-}
-
-function messageContentText(msg) {
-    return typeof msg.content === 'string' ? msg.content
-        : Array.isArray(msg.content) ? msg.content.filter(p => p && (p.type === 'text' || typeof p.text === 'string')).map(p => p.text || '').join('\n')
-        : '';
-}
-
-/**
- * Extract OC conversation label from messages.
- * Looks for "Conversation info (untrusted metadata)" JSON block in text-bearing
- * user/developer/system messages. Returns the conversation_label string, or null
- * if not found (e.g. DMs).
- */
-function extractConversationLabel(messages) {
-    for (const msg of messages) {
-        if (!['user', 'developer', 'system'].includes(msg.role)) continue;
-        const content = messageContentText(msg);
-        const match = content.match(/Conversation info \(untrusted metadata\):\s*```json\s*(\{[\s\S]*?\})\s*```/);
-        if (match) {
-            try {
-                const meta = JSON.parse(match[1]);
-                // Use conversation_label for group chats, fall back to sender for DMs
-                return meta.conversation_label || (meta.sender ? `dm:${meta.sender}` : null);
-            } catch {}
-        }
-    }
-    return null;
-}
-
-
-/**
- * Extract stable OpenClaw inbound identity from the system/developer context.
- * Recent OpenClaw requests may omit the older Conversation info block and do
- * not forward x-openclaw-session-key to custom OpenAI-compatible providers.
- * The trusted inbound metadata block is still present in prompt context, so use
- * it as a bridge-owned fallback instead of starting a fresh Claude session.
- */
-function extractInboundContext(messages) {
-    for (const msg of messages) {
-        if (!['user', 'developer', 'system'].includes(msg.role)) continue;
-        const content = messageContentText(msg);
-        const match = content.match(/Inbound Context \(trusted metadata\)[\s\S]*?```json\s*(\{[\s\S]*?\})\s*```/);
-        if (!match) continue;
-        try {
-            const meta = JSON.parse(match[1]);
-            const channel = typeof meta.channel === 'string' && meta.channel.trim() ? meta.channel.trim() : null;
-            const chatType = typeof meta.chat_type === 'string' && meta.chat_type.trim() ? meta.chat_type.trim() : null;
-            const account = typeof meta.account_id === 'string' && meta.account_id.trim() ? meta.account_id.trim() : null;
-            const provider = typeof meta.provider === 'string' && meta.provider.trim() ? meta.provider.trim() : null;
-            const surface = typeof meta.surface === 'string' && meta.surface.trim() ? meta.surface.trim() : null;
-            const parts = [channel || provider || surface, chatType, account].filter(Boolean);
-            const label = parts.length ? parts.join(':') : null;
-            return { label, channel, chatType, account, provider, surface };
-        } catch {}
-    }
-    return null;
-}
-
-/**
- * Extract agent name from developer/system messages.
- * OC includes the agent's IDENTITY.md in the system prompt, which contains "**Name:** AgentName".
- * Returns the agent name string, or null if not found.
- */
-function extractAgentName(messages) {
-    for (const msg of messages) {
-        if (msg.role !== 'developer' && msg.role !== 'system') continue;
-        const text = messageContentText(msg);
-        const match = text.match(/\*\*Name:\*\*\s*(.+)/);
-        if (match) {
-            const name = match[1].trim();
-            if (name && !name.startsWith('_')) return name;
-        }
-    }
-    return null;
-}
-
-function messageText(msg) {
-    if (!msg) return '';
-    return messageContentText(msg);
-}
+const { statusApp } = require('./dashboard-api');
+const { getContextWindow } = require('./claude');
 
 /**
  * OpenClaw sometimes asks the configured model for a short session filename slug.
@@ -287,69 +61,6 @@ function isSessionTitleSlugRequest(messages) {
             || /generate a short 1-2 word filename slug \(lowercase, hyphen-separated, no file extension\)/i.test(text);
     });
 }
-
-/**
- * Detect if this is a new OC session (has "✅ New session started" marker
- * as the FIRST assistant/previous_response content, with no other assistant messages we recognise).
- */
-
-/**
- * Clean up all in-memory entries belonging to a specific CLI session.
- * Also delete the CLI session file from disk.
- */
-function purgeCliSession(cliSessionId) {
-    clearSessionAlias(cliSessionId);
-    // Clean sessionMap
-    for (const [key, val] of sessionMap) {
-        if (val.sessionId === cliSessionId) sessionMap.delete(key);
-    }
-    // Clean responseMap
-    for (const [key, val] of responseMap) {
-        if (val.sessionId === cliSessionId) responseMap.delete(key);
-    }
-    // Delete CLI session file
-    const sessionFile = path.join(SESSIONS_DIR, `${cliSessionId}.jsonl`);
-    try {
-        if (fs.existsSync(sessionFile)) {
-            fs.unlinkSync(sessionFile);
-            console.log(`[session] Purged old CLI session file: ${cliSessionId}`);
-        }
-    } catch (err) {
-        console.warn(`[session] Failed to delete session file ${cliSessionId}: ${err.message}`);
-    }
-}
-
-/** Garbage-collect orphaned in-memory entries older than MEMORY_GC_TTL_MS. */
-function gcMemory() {
-    const cutoff = Date.now() - MEMORY_GC_TTL_MS;
-    for (const [key, val] of sessionMap) {
-        if (val.createdAt < cutoff) sessionMap.delete(key);
-    }
-    for (const [key, val] of responseMap) {
-        if (val.createdAt < cutoff) responseMap.delete(key);
-    }
-}
-
-// Circular buffer: last 200 requests
-const MAX_LOG = 200;
-const requestLog = [];
-function pushLog(entry) {
-    requestLog.push(entry);
-    if (requestLog.length > MAX_LOG) requestLog.shift();
-}
-
-// Live activity feed (global, last 50 messages)
-const MAX_ACTIVITY = 50;
-const globalActivity = [];
-function pushActivity(requestId, msg) {
-    globalActivity.push({ id: requestId, at: Date.now(), msg });
-    if (globalActivity.length > MAX_ACTIVITY) globalActivity.shift();
-}
-
-// Load persisted state (channelMap, responseMap, requestLog, stats, globalActivity)
-loadState();
-
-// Tool-call parsing and internal bridge markup cleanup live in ./tool-parser.
 
 // ─── API app (port 3456, localhost only) ──────────────────────────────────────
 const app = express();
@@ -451,24 +162,14 @@ app.post('/v1/chat/completions', async (req, res) => {
         // Memory flush interception: OC sends tools=0 before compaction, no need to proxy to CLI
         if (tools.length === 0) {
             const promptLen = messages.reduce((s, m) => s + JSON.stringify(m.content || '').length, 0);
-            const mfChannel = extractConversationLabel(messages);
-            const mfInboundContext = extractInboundContext(messages);
-            const mfPromptCacheKey = typeof prompt_cache_key === 'string' && prompt_cache_key.trim() ? prompt_cache_key.trim() : null;
-            const mfOpenAiUser = typeof user === 'string' && user.trim() ? user.trim() : null;
-            const mfAgent = extractAgentName(messages);
-            let mfRoutingSource = null;
-            const mfDisplayChannel = mfChannel
-                || (mfInboundContext ? (mfInboundContext.channel || mfInboundContext.label) : null)
-                || (mfPromptCacheKey ? `session:${mfPromptCacheKey}` : null)
-                || (mfOpenAiUser ? `user:${mfOpenAiUser}` : null);
-            if (mfChannel) mfRoutingSource = 'conversationLabel';
-            else if (mfInboundContext?.label) mfRoutingSource = 'inboundContext';
-            else if (mfPromptCacheKey) mfRoutingSource = 'promptCacheKey';
-            else if (mfOpenAiUser) mfRoutingSource = 'openAiUser';
-            logEntry.channel = mfDisplayChannel ? mfDisplayChannel.replace(/^Guild\s+/, '').slice(0, 40) : null;
-            logEntry.routingSource = mfRoutingSource;
-            logEntry.agent = mfAgent || null;
-            console.log(`[${requestId}] MEMORY FLUSH intercepted: tools=0 channel="${mfDisplayChannel}" source=${mfRoutingSource || 'none'} agent="${mfAgent}" promptLen≈${promptLen}, returning NO_REPLY`);
+            const mfSignals = extractRoutingSignals({ req, body: req.body, messages });
+            const mfRouting = pickRouting(mfSignals, MEMFLUSH_PRIORITY);
+            logEntry.channel = mfRouting.displayChannel
+                ? mfRouting.displayChannel.replace(/^Guild\s+/, '').slice(0, 40)
+                : null;
+            logEntry.routingSource = mfRouting.routingSource;
+            logEntry.agent = mfSignals.agentName || null;
+            console.log(`[${requestId}] MEMORY FLUSH intercepted: tools=0 channel="${mfRouting.displayChannel}" source=${mfRouting.routingSource || 'none'} agent="${mfSignals.agentName}" promptLen≈${promptLen}, returning NO_REPLY`);
             logEntry.status = 'ok';
             logEntry.resumeMethod = 'memflush';
             logEntry.promptLen = promptLen;
@@ -492,42 +193,11 @@ app.post('/v1/chat/completions', async (req, res) => {
         let isResume = false;
         let resumeSessionId = null;
 
-        // Extract conversation identity.
-        // Priority:
-        // 1. OpenClaw-style conversation metadata + agent name, for multi-agent channels.
-        // 2. OpenClaw session key header, which is stable for a chat session when
-        //    forwarded by the provider transport.
-        // 3. OpenClaw trusted inbound metadata, which remains available in prompt
-        //    context when provider transports do not forward custom headers.
-        // 4. OpenAI-compatible `user` field, for OpenAI clients and raw API tests.
-        // Without these stable fallbacks, every turn starts a fresh Claude CLI session.
-        const convLabel = extractConversationLabel(messages);
-        const inboundContext = extractInboundContext(messages);
-        const inboundLabel = inboundContext?.label || null;
-        const agentName = extractAgentName(messages);
-        const openAiUser = typeof user === 'string' && user.trim() ? user.trim() : null;
-        const promptCacheKey = typeof prompt_cache_key === 'string' && prompt_cache_key.trim() ? prompt_cache_key.trim() : null;
-        let routingSource = null;
-        let routingLabel = null;
-        if (convLabel) {
-            routingSource = 'conversationLabel';
-            routingLabel = agentName ? `${convLabel}::${agentName}` : convLabel;
-        } else if (ocSessionKey) {
-            routingSource = 'openclawSessionKey';
-            routingLabel = ocSessionKey;
-        } else if (inboundLabel) {
-            routingSource = 'inboundContext';
-            routingLabel = agentName ? `${inboundLabel}::${agentName}` : inboundLabel;
-        } else if (promptCacheKey) {
-            routingSource = 'promptCacheKey';
-            routingLabel = promptCacheKey;
-        } else if (openAiUser) {
-            routingSource = 'openAiUser';
-            routingLabel = openAiUser;
-        }
-        const routingKey = routingLabel
-            ? `${routingSource}:${routingLabel}`
-            : null;
+        // Extract conversation identity (5-source priority defined in routing.js).
+        const signals = extractRoutingSignals({ req, body: req.body, messages });
+        const { convLabel, inboundContext, inboundLabel, agentName, openAiUser, promptCacheKey } = signals;
+        const routing = pickRouting(signals, MAIN_PRIORITY);
+        const { routingSource, routingKey } = routing;
         logEntry.routingSource = routingSource;
         if (routingKey) {
             console.log(`[${requestId}] OC channel: "${convLabel || ocSessionKey || inboundLabel || promptCacheKey || openAiUser}" source=${routingSource} agent: "${agentName || '(none)'}" routingKey: "${routingKey}"`);
@@ -739,12 +409,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         logEntry.promptLen = promptText.length;
         logEntry.cliSessionId = sessionId.slice(0, 8);
         logEntry.resumed = isResume;
-        const displayChannel = convLabel
-            || (routingSource === 'openclawSessionKey' ? `session:${ocSessionKey}` : null)
-            || (routingSource === 'inboundContext' ? (inboundContext?.channel || inboundLabel) : null)
-            || (routingSource === 'promptCacheKey' ? `session:${promptCacheKey}` : null)
-            || (routingSource === 'openAiUser' ? `user:${openAiUser}` : null);
-        logEntry.channel = displayChannel ? displayChannel.replace(/^Guild\s+/, '').slice(0, 40) : null;
+        logEntry.channel = routing.displayChannel
+            ? routing.displayChannel.replace(/^Guild\s+/, '').slice(0, 40)
+            : null;
         logEntry.agent = agentName || null;
         console.log(`[${requestId}] model=${model} tools=${tools.length} promptLen=${promptText.length} resume=${isResume}`);
 
@@ -759,17 +426,12 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         const completionId = `chatcmpl-${requestId}`;
         let chunksSent = 0;
-        let accumulatedText = '';
 
         const sendChunk = (delta, finishReason = null) => {
-            const chunk = {
-                id: completionId,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model,
-                choices: [{ index: 0, delta: finishReason ? {} : { role: 'assistant', content: delta }, finish_reason: finishReason }],
-            };
-            if (isStream) { res.write(`data: ${JSON.stringify(chunk)}\n\n`); chunksSent++; }
+            if (isStream) {
+                writeSseChunk(res, completionId, model, delta, finishReason);
+                chunksSent++;
+            }
         };
 
         // Progress: logged server-side + captured for dashboard (not streamed to client)
@@ -871,16 +533,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         logEntry.outputTokens = finalUsage.output_tokens;
         logEntry.costUsd = finalUsage.cost_usd;
 
-        const totalInput = (finalUsage.input_tokens || 0) + (finalUsage.cache_creation_tokens || 0) + (finalUsage.cache_read_tokens || 0);
-        const usagePayload = {
-            prompt_tokens:     totalInput,
-            completion_tokens: finalUsage.output_tokens,
-            total_tokens:      totalInput + finalUsage.output_tokens,
-            prompt_tokens_details: {
-                cached_tokens: finalUsage.cache_read_tokens,
-                cache_creation_tokens: finalUsage.cache_creation_tokens,
-            },
-        };
+        const usagePayload = buildUsagePayload(finalUsage);
 
         // Parse <tool_call> blocks from Claude's response. Exact XML is preferred;
         // one unambiguous malformed block can be repaired, but only for declared tools.
@@ -899,7 +552,6 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         if (toolCalls.length > 0) {
             // Claude requested tools → return as OpenAI tool_calls for OC to execute
-            const textBeforeTools = cleanResponseText(finalText || '');
             const toolNames = toolCalls.map(tc => tc.name).join(', ');
             console.log(`[${requestId}] → tool_calls: [${toolNames}]`);
             pushActivity(requestId, `→ tool_calls: [${toolNames}]`);
@@ -912,54 +564,9 @@ app.post('/v1/chat/completions', async (req, res) => {
             console.log(`[${requestId}] sessionMap: stored ${toolCalls.length} tool_call_ids for session=${sessionId.slice(0, 8)} (total=${sessionMap.size})`);
 
             if (isStream) {
-                // Suppress any partial assistant prose before tool calls.
-                // Tool-use turns should only surface the tool_calls payload until
-                // the loop completes and a final verified reply is ready.
-                const tcDelta = {
-                    id: completionId, object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000), model,
-                    choices: [{ index: 0, delta: {
-                        tool_calls: toolCalls.map((tc, i) => ({
-                            index: i,
-                            id: tc.id,
-                            type: 'function',
-                            function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
-                        })),
-                    }, finish_reason: null }],
-                };
-                res.write(`data: ${JSON.stringify(tcDelta)}\n\n`);
-
-                // Send finish with tool_calls reason (no usage here per OpenAI spec)
-                const stopChunk = {
-                    id: completionId, object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000), model,
-                    choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
-                };
-                res.write(`data: ${JSON.stringify(stopChunk)}\n\n`);
-                // Separate usage chunk with empty choices (OpenAI streaming spec)
-                const usageChunk = {
-                    id: completionId, object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000), model,
-                    choices: [],
-                    usage: usagePayload,
-                };
-                res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
-                res.write('data: [DONE]\n\n');
-                res.end();
+                writeToolCallsStream(res, completionId, model, toolCalls, usagePayload);
             } else {
-                res.json({
-                    id: completionId, object: 'chat.completion',
-                    created: Math.floor(Date.now() / 1000), model,
-                    choices: [{ index: 0, message: {
-                        role: 'assistant',
-                        content: null,
-                        tool_calls: toolCalls.map((tc, i) => ({
-                            id: tc.id, index: i, type: 'function',
-                            function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
-                        })),
-                    }, finish_reason: 'tool_calls' }],
-                    usage: usagePayload,
-                });
+                res.json(buildToolCallsNonStream(completionId, model, toolCalls, usagePayload));
             }
         } else {
             // No tool calls — return clean text with finish_reason: stop.
@@ -972,30 +579,9 @@ app.post('/v1/chat/completions', async (req, res) => {
             if (cleanText) sendChunk(cleanText);
 
             if (isStream) {
-                // Stop chunk (no usage here per OpenAI spec)
-                const stopChunk = {
-                    id: completionId, object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000), model,
-                    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-                };
-                res.write(`data: ${JSON.stringify(stopChunk)}\n\n`);
-                // Separate usage chunk with empty choices (OpenAI streaming spec)
-                const usageChunk = {
-                    id: completionId, object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000), model,
-                    choices: [],
-                    usage: usagePayload,
-                };
-                res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
-                res.write('data: [DONE]\n\n');
-                res.end();
+                writeStopStream(res, completionId, model, usagePayload);
             } else {
-                res.json({
-                    id: completionId, object: 'chat.completion',
-                    created: Math.floor(Date.now() / 1000), model,
-                    choices: [{ index: 0, message: { role: 'assistant', content: cleanText || '' }, finish_reason: 'stop' }],
-                    usage: usagePayload,
-                });
+                res.json(buildTextNonStream(completionId, model, cleanText, usagePayload));
             }
         }
 
@@ -1044,80 +630,6 @@ app.post('/v1/chat/completions', async (req, res) => {
         logEntry.durationMs = logEntry.durationMs ?? (Date.now() - startTime);
         saveState();
     }
-});
-
-// ─── Status app (port 3458, default localhost; bind controlled in index.js) ───
-const statusApp = express();
-
-statusApp.use(express.json());
-
-// Dashboard password protection (Basic Auth).
-// When DASHBOARD_PASS is set, every status/dashboard route requires the header.
-// When it is not set, the dashboard relies on localhost-only bind for safety
-// (index.js refuses to bind a non-loopback interface without a password).
-const DASHBOARD_PASS = process.env.DASHBOARD_PASS;
-const hasDashboardAuth = !!DASHBOARD_PASS;
-if (hasDashboardAuth) {
-    const expected = 'Basic ' + Buffer.from('admin:' + DASHBOARD_PASS).toString('base64');
-    statusApp.use((req, res, next) => {
-        if (req.headers.authorization === expected) return next();
-        res.setHeader('WWW-Authenticate', 'Basic realm="Dashboard"');
-        res.status(401).send('Unauthorized');
-    });
-}
-
-// Destructive routes (/cleanup) always require Basic Auth, regardless of bind.
-// Without DASHBOARD_PASS the route is disabled (use the CLI instead).
-function requireDashboardAuth(req, res, next) {
-    if (hasDashboardAuth) return next();
-    res.status(403).json({
-        error: 'dashboard_password_required',
-        message: 'Set DASHBOARD_PASS to enable this endpoint. Without a password the dashboard is read-only and bound to localhost.',
-    });
-}
-
-// Serve React dashboard (built files)
-statusApp.use(express.static(path.join(__dirname, '../dashboard/dist')));
-
-statusApp.get('/status', (req, res) => {
-    res.json({
-        status: 'running',
-        uptime: Math.floor((Date.now() - stats.startedAt) / 1000),
-        startedAt: stats.startedAt,
-        totalRequests: stats.totalRequests,
-        activeRequests: stats.activeRequests,
-        lastRequestAt: stats.lastRequestAt,
-        lastModel: stats.lastModel,
-        errors: stats.errors,
-        sessions: getSessionInfo(),
-        channels: Array.from(channelMap.entries()).map(([label, val]) => ({
-            label: label.replace(/^Guild\s+/, '').slice(0, 40),
-            sessionId: val.sessionId.slice(0, 8),
-            age: Math.floor((Date.now() - val.createdAt) / 1000),
-            routingSource: val.routingSource || null,
-        })),
-        contextWindows: {
-            'claude-opus-4-7': getContextWindow('claude-opus-4-7'),
-            'claude-opus-4-6': getContextWindow('claude-opus-4-6'),
-            'claude-sonnet-4-6': getContextWindow('claude-sonnet-4-6'),
-            'claude-haiku-4-5': getContextWindow('claude-haiku-4-5'),
-        },
-        activity: globalActivity.slice(-30),
-        log: [...requestLog].reverse(),
-    });
-});
-
-statusApp.post('/cleanup', requireDashboardAuth, (req, res) => {
-    const result = cleanupSessions(); // default: delete sessions older than 24h
-    console.log(`[openclaw-claude-bridge] Manual cleanup: deleted ${result.deleted}, remaining ${result.remaining}`);
-    res.json(result);
-});
-
-// SPA fallback — serve index.html for any non-API route. Express 5 uses
-// path-to-regexp v8, where bare '*' is invalid; use middleware as the
-// catch-all instead.
-statusApp.use((req, res) => {
-    res.sendFile(path.join(__dirname, '../dashboard/dist/index.html'));
 });
 
 module.exports = { app, statusApp, stats, saveState };
