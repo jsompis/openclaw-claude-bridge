@@ -3,7 +3,7 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 
-const { convertMessages, convertMessagesCompact, extractNewMessages, extractNewUserMessages } = require('./convert');
+const { convertMessagesAsync, convertMessagesCompactAsync, extractNewMessagesAsync, extractNewUserMessagesAsync } = require('./convert');
 const { buildToolInstructions } = require('./tools');
 const { runClaude } = require('./claude');
 const { cleanResponseText, hasInternalBridgeMarkup, parseToolCallsDetailed, redactSensitivePreview } = require('./tool-parser');
@@ -304,9 +304,9 @@ app.post('/v1/chat/completions', async (req, res) => {
             const lastHash = entry?.lastCompactionHash ?? null;
 
             if (compactionHash !== null && compactionHash !== lastHash) {
-                const inToolLoop = extractNewMessages(messages) !== null;
+                const inToolLoop = await extractNewMessagesAsync(messages) !== null;
                 if (!inToolLoop) {
-                    const compactResult = convertMessagesCompact(messages);
+                    const compactResult = await convertMessagesCompactAsync(messages);
                     if (compactResult.promptText.length > 1500000) {
                         console.log(`[${requestId}] REFRESH SKIPPED: compact prompt too long (${compactResult.promptText.length})`);
                     } else {
@@ -334,7 +334,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         let attachmentBlocks = [];
 
         // Always build system prompt (not persisted in CLI session)
-        const { systemPrompt: devSystemPrompt } = convertMessages(messages);
+        const { systemPrompt: devSystemPrompt } = await convertMessagesAsync(messages);
         const toolInstructions = buildToolInstructions(tools);
         combinedSystemPrompt = devSystemPrompt
             ? `${devSystemPrompt}${toolInstructions}`
@@ -344,9 +344,9 @@ app.post('/v1/chat/completions', async (req, res) => {
             // Resume mode: only send new messages as prompt
             sessionId = resumeSessionId;
             // 1) Try tool loop extraction (messages after last assistant tool_calls)
-            const newToolLoop = extractNewMessages(messages);
+            const newToolLoop = await extractNewMessagesAsync(messages);
             // 2) Try conversation continuation (messages after last assistant message)
-            const newCont = !newToolLoop ? extractNewUserMessages(messages) : null;
+            const newCont = !newToolLoop ? await extractNewUserMessagesAsync(messages) : null;
             if (newToolLoop) {
                 promptText = newToolLoop.newText;
                 attachmentBlocks = newToolLoop.attachmentBlocks || [];
@@ -365,7 +365,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 // shape there is no assistant anchor for extractNewUserMessages(),
                 // but we still should resume the mapped Claude CLI session and send
                 // the current user turn.
-                const full = convertMessages(messages);
+                const full = await convertMessagesAsync(messages);
                 promptText = full.promptText;
                 attachmentBlocks = full.attachmentBlocks || [];
                 logEntry.resumeMethod = 'user_key_continuation';
@@ -376,7 +376,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 logEntry.resumeMethod = 'fallback';
                 isResume = false;
                 sessionId = uuidv4();
-                const full = convertMessages(messages);
+                const full = await convertMessagesAsync(messages);
                 promptText = full.promptText;
                 attachmentBlocks = full.attachmentBlocks || [];
                 console.log(`[${requestId}] RESUME fallback → new session=${sessionId.slice(0, 8)}`);
@@ -398,7 +398,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 console.log(`[${requestId}] NEW session=${sessionId.slice(0, 8)} (context refresh)`);
                 pushActivity(requestId, `🔄 context refresh → new session (${promptText.length} chars)`);
             } else {
-                const full = convertMessages(messages);
+                const full = await convertMessagesAsync(messages);
                 promptText = full.promptText;
                 attachmentBlocks = full.attachmentBlocks || [];
                 console.log(`[${requestId}] NEW session=${sessionId.slice(0, 8)}`);
@@ -486,7 +486,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 sessionId = uuidv4();
                 logEntry.resumeMethod = wasResume ? 'refresh' : (terminatedCompletion ? 'retry_terminated' : 'retry_empty');
                 if (wasResume) {
-                    const compactResult = convertMessagesCompact(messages);
+                    const compactResult = await convertMessagesCompactAsync(messages);
                     promptText = compactResult.promptText;
                     if (compactResult.systemPrompt) {
                         combinedSystemPrompt = `${compactResult.systemPrompt}${toolInstructions}`;

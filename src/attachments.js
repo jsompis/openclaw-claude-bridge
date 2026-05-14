@@ -36,7 +36,6 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { execFileSync } = require('child_process');
 const { URL } = require('url');
 
 const MODE = process.env.OPENCLAW_BRIDGE_ATTACHMENT_MODE || 'passthrough';
@@ -111,6 +110,11 @@ function _mimeFromExt(ext) {
     return map[(ext || '').toLowerCase()] || 'application/octet-stream';
 }
 
+function _cleanMime(mime) {
+    if (!mime || typeof mime !== 'string') return null;
+    return mime.split(';', 1)[0].trim().toLowerCase() || null;
+}
+
 function _parseDataUrl(url) {
     const m = url.match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
     if (!m) return null;
@@ -174,74 +178,147 @@ function _resolveAllowedLocalPath(inputPath) {
     return policyPath;
 }
 
-function _downloadSync(url) {
-    const tmp = path.join(ATTACH_DIR, `.dl-${crypto.randomBytes(6).toString('hex')}.tmp`);
+function _isRemoteUrl(url) {
+    return /^https?:\/\//i.test(url || '');
+}
+
+function _nameFromUrl(url) {
     try {
-        execFileSync('curl', [
-            '-fsSL',
-            '--max-time', String(Math.floor(DOWNLOAD_TIMEOUT_MS / 1000)),
-            '--max-filesize', String(DOWNLOAD_MAX_BYTES),
-            '-o', tmp,
-            url,
-        ], { stdio: ['ignore', 'ignore', 'pipe'] });
-        const buf = fs.readFileSync(tmp);
-        return buf;
-    } finally {
-        try { fs.unlinkSync(tmp); } catch {}
+        const name = path.basename(new URL(url).pathname);
+        return name || null;
+    } catch {
+        return null;
     }
+}
+
+async function _download(url) {
+    if (typeof fetch !== 'function') {
+        throw new Error('remote attachment downloads require global fetch');
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+    try {
+        const response = await fetch(url, { signal: controller.signal });
+
+        if (!response.ok) {
+            throw new Error(`download failed: HTTP ${response.status}`);
+        }
+
+        const contentLength = Number(response.headers.get('content-length') || 0);
+        if (contentLength > DOWNLOAD_MAX_BYTES) {
+            throw new Error(`download exceeded max bytes (${contentLength} > ${DOWNLOAD_MAX_BYTES})`);
+        }
+
+        const mime = _cleanMime(response.headers.get('content-type'));
+        const body = response.body;
+        if (body && typeof body.getReader === 'function') {
+            const reader = body.getReader();
+            const chunks = [];
+            let total = 0;
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    const chunk = Buffer.from(value);
+                    total += chunk.length;
+                    if (total > DOWNLOAD_MAX_BYTES) {
+                        try { await reader.cancel(); } catch {}
+                        throw new Error(`download exceeded max bytes (${total} > ${DOWNLOAD_MAX_BYTES})`);
+                    }
+                    chunks.push(chunk);
+                }
+            } finally {
+                try { reader.releaseLock(); } catch {}
+            }
+            return { buf: Buffer.concat(chunks, total), mime };
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        if (arrayBuffer.byteLength > DOWNLOAD_MAX_BYTES) {
+            throw new Error(`download exceeded max bytes (${arrayBuffer.byteLength} > ${DOWNLOAD_MAX_BYTES})`);
+        }
+        return { buf: Buffer.from(arrayBuffer), mime };
+    } catch (err) {
+        if (err?.name === 'AbortError') {
+            throw new Error(`download timed out after ${DOWNLOAD_TIMEOUT_MS}ms`);
+        }
+        if (/^download (?:failed|exceeded)/.test(err?.message || '')) {
+            throw err;
+        }
+        throw new Error(`download failed: ${err.message}`);
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function _resolveLocalOrDataUrl(url) {
+    if (url.startsWith('data:')) {
+        const parsed = _parseDataUrl(url);
+        if (!parsed) return null;
+        return { bytes: parsed.buf, mime: parsed.mime, name: null };
+    }
+    if (url.startsWith('/') || url.startsWith('~') || url.startsWith('./')) {
+        const abs = _resolveAllowedLocalPath(url);
+        if (!abs) return null;
+        if (!fs.existsSync(abs)) return null;
+        return {
+            bytes: fs.readFileSync(abs),
+            name: path.basename(abs),
+            mime: _mimeFromExt(_safeExt(abs)),
+        };
+    }
+    return null;
+}
+
+function _finalizeImageAttachment(resolved) {
+    if (!resolved) return null;
+    let { bytes, mime, name } = resolved;
+    if (!IMAGE_MIMES.has((mime || '').toLowerCase())) {
+        const fromName = _mimeFromExt(_safeExt(name));
+        if (IMAGE_MIMES.has(fromName)) mime = fromName;
+        else mime = mime || 'image/png';  // best-effort default
+    }
+    return { bytes, mime, name };
 }
 
 /**
  * Resolve an OpenAI content part to {bytes, mime, name} or null if not an
- * attachment we handle. Used by classifyParts() to build Anthropic content
+ * attachment we handle. Used by classifyPartsAsync() to build Anthropic content
  * blocks.
  */
-function _resolveAttachment(part) {
-    let bytes = null;
-    let mime = null;
-    let name = null;
-
+async function _resolveAttachment(part) {
     if (part.type === 'image_url' || part.type === 'input_image') {
         const v = part.image_url;
         const url = typeof v === 'string' ? v : (v && v.url);
         if (!url) return null;
 
-        if (url.startsWith('data:')) {
-            const parsed = _parseDataUrl(url);
-            if (!parsed) return null;
-            bytes = parsed.buf; mime = parsed.mime;
-        } else if (/^https?:\/\//i.test(url)) {
-            bytes = _downloadSync(url);
-            try {
-                const u = new URL(url);
-                name = path.basename(u.pathname);
-                mime = _mimeFromExt(_safeExt(name));
-            } catch {}
-        } else if (url.startsWith('/') || url.startsWith('~') || url.startsWith('./')) {
-            const abs = _resolveAllowedLocalPath(url);
-            if (!abs) return null;
-            if (!fs.existsSync(abs)) return null;
-            bytes = fs.readFileSync(abs);
-            name = path.basename(abs);
-            mime = _mimeFromExt(_safeExt(name));
-        } else {
-            return null;
+        if (_isRemoteUrl(url)) {
+            const { buf, mime } = await _download(url);
+            return _finalizeImageAttachment({ bytes: buf, mime, name: _nameFromUrl(url) });
         }
-        // Force to a known image mime if extension says so
-        if (!IMAGE_MIMES.has((mime || '').toLowerCase())) {
-            const fromName = _mimeFromExt(_safeExt(name));
-            if (IMAGE_MIMES.has(fromName)) mime = fromName;
-            else mime = mime || 'image/png';  // best-effort default
-        }
-    } else if (part.type === 'file') {
+        return _finalizeImageAttachment(_resolveLocalOrDataUrl(url));
+    }
+
+    if (part.type === 'file') {
         const f = part.file || {};
-        name = f.filename || f.name || null;
+        let name = f.filename || f.name || null;
+        let bytes = null;
+        let mime = null;
         if (f.file_data) {
             try { bytes = Buffer.from(f.file_data, 'base64'); } catch { return null; }
         } else if (f.file_url) {
-            bytes = _downloadSync(f.file_url);
-            if (!name) {
-                try { name = path.basename(new URL(f.file_url).pathname); } catch {}
+            if (_isRemoteUrl(f.file_url)) {
+                const downloaded = await _download(f.file_url);
+                bytes = downloaded.buf;
+                mime = downloaded.mime;
+                if (!name) name = _nameFromUrl(f.file_url);
+            } else {
+                const resolved = _resolveLocalOrDataUrl(f.file_url);
+                if (!resolved) return null;
+                bytes = resolved.bytes;
+                mime = resolved.mime;
+                if (!name) name = resolved.name;
             }
         } else if (f.path) {
             const abs = _resolveAllowedLocalPath(f.path);
@@ -253,13 +330,98 @@ function _resolveAttachment(part) {
             return null;
         }
         const ext = _safeExt(name);
-        mime = _mimeFromExt(ext);
-    } else {
-        return null;
+        mime = mime || _mimeFromExt(ext);
+        return { bytes, mime, name };
     }
 
-    if (!bytes) return null;
-    return { bytes, mime, name };
+    return null;
+}
+
+function _resolveAttachmentSync(part) {
+    if (part.type === 'image_url' || part.type === 'input_image') {
+        const v = part.image_url;
+        const url = typeof v === 'string' ? v : (v && v.url);
+        if (!url) return null;
+        if (_isRemoteUrl(url)) {
+            throw new Error('remote downloads require async path');
+        }
+        return _finalizeImageAttachment(_resolveLocalOrDataUrl(url));
+    }
+
+    if (part.type === 'file') {
+        const f = part.file || {};
+        let name = f.filename || f.name || null;
+        let bytes = null;
+        let mime = null;
+        if (f.file_data) {
+            try { bytes = Buffer.from(f.file_data, 'base64'); } catch { return null; }
+        } else if (f.file_url) {
+            if (_isRemoteUrl(f.file_url)) {
+                throw new Error('remote downloads require async path');
+            }
+            const resolved = _resolveLocalOrDataUrl(f.file_url);
+            if (!resolved) return null;
+            bytes = resolved.bytes;
+            mime = resolved.mime;
+            if (!name) name = resolved.name;
+        } else if (f.path) {
+            const abs = _resolveAllowedLocalPath(f.path);
+            if (!abs) return null;
+            if (!fs.existsSync(abs)) return null;
+            bytes = fs.readFileSync(abs);
+            if (!name) name = path.basename(abs);
+        } else {
+            return null;
+        }
+        const ext = _safeExt(name);
+        mime = mime || _mimeFromExt(ext);
+        return { bytes, mime, name };
+    }
+
+    return null;
+}
+
+function _appendResolved({ resolved, attachments, textSegments, turnId, count }) {
+    const { bytes, mime, name } = resolved;
+
+    // Image → Anthropic image block
+    if (IMAGE_MIMES.has((mime || '').toLowerCase())) {
+        attachments.push({
+            type: 'image',
+            source: {
+                type: 'base64',
+                media_type: mime,
+                data: bytes.toString('base64'),
+            },
+        });
+        return;
+    }
+    // PDF → Anthropic document block
+    if (DOC_MIMES.has((mime || '').toLowerCase())) {
+        attachments.push({
+            type: 'document',
+            source: {
+                type: 'base64',
+                media_type: mime,
+                data: bytes.toString('base64'),
+            },
+        });
+        return;
+    }
+    // Text/code file → inline as fenced block in the text segment.
+    // Cheap, lossless for the use cases (configs, source files, logs).
+    // Also persist the file to state/attachments/ for debugging.
+    try {
+        const ext = _extFromMime(mime) || _safeExt(name, 'txt');
+        const slug = `${turnId}-${count}-${crypto.randomBytes(3).toString('hex')}.${ext}`;
+        fs.writeFileSync(path.join(ATTACH_DIR, slug), bytes);
+    } catch {}
+    const lang = _safeExt(name, '');
+    const asText = bytes.toString('utf8');
+    const displayName = name || `attachment.${_extFromMime(mime) || 'bin'}`;
+    textSegments.push(
+        `\n[attached file: ${displayName}]\n\`\`\`${lang}\n${asText}\n\`\`\`\n`
+    );
 }
 
 /**
@@ -310,7 +472,7 @@ function classifyParts(content, turnId) {
 
         let resolved;
         try {
-            resolved = _resolveAttachment(p);
+            resolved = _resolveAttachmentSync(p);
         } catch (err) {
             console.warn(`[attachments] resolve failed: ${err.message}`);
             textSegments.push(`[attachment skipped: ${err.message}]`);
@@ -320,46 +482,58 @@ function classifyParts(content, turnId) {
             textSegments.push('[attachment skipped: unrecognized format]');
             continue;
         }
-        const { bytes, mime, name } = resolved;
+        _appendResolved({ resolved, attachments, textSegments, turnId, count });
+    }
 
-        // Image → Anthropic image block
-        if (IMAGE_MIMES.has((mime || '').toLowerCase())) {
-            attachments.push({
-                type: 'image',
-                source: {
-                    type: 'base64',
-                    media_type: mime,
-                    data: bytes.toString('base64'),
-                },
-            });
+    return {
+        text: textSegments.join('\n'),
+        attachments,
+    };
+}
+
+async function classifyPartsAsync(content, turnId) {
+    if (typeof content === 'string') {
+        return { text: content, attachments: [] };
+    }
+    if (content === null || content === undefined) {
+        return { text: '', attachments: [] };
+    }
+    if (!Array.isArray(content)) {
+        return { text: String(content ?? ''), attachments: [] };
+    }
+
+    const textSegments = [];
+    const attachments = [];
+    let count = 0;
+
+    for (const p of content) {
+        if (!p || typeof p !== 'object') continue;
+        if (p.type === 'text') {
+            if (p.text) textSegments.push(p.text);
             continue;
         }
-        // PDF → Anthropic document block
-        if (DOC_MIMES.has((mime || '').toLowerCase())) {
-            attachments.push({
-                type: 'document',
-                source: {
-                    type: 'base64',
-                    media_type: mime,
-                    data: bytes.toString('base64'),
-                },
-            });
-            continue;
+        if (MODE === 'describe') continue;
+
+        if (++count > PER_TURN_CAP) {
+            throw new AttachmentBudgetError(
+                `per-turn cap exceeded (${count} > ${PER_TURN_CAP})`
+            );
         }
-        // Text/code file → inline as fenced block in the text segment.
-        // Cheap, lossless for the use cases (configs, source files, logs).
-        // Also persist the file to state/attachments/ for debugging.
+        _checkSessionBudget();
+
+        let resolved;
         try {
-            const ext = _extFromMime(mime) || _safeExt(name, 'txt');
-            const slug = `${turnId}-${count}-${crypto.randomBytes(3).toString('hex')}.${ext}`;
-            fs.writeFileSync(path.join(ATTACH_DIR, slug), bytes);
-        } catch {}
-        const lang = _safeExt(name, '');
-        const asText = bytes.toString('utf8');
-        const displayName = name || `attachment.${_extFromMime(mime) || 'bin'}`;
-        textSegments.push(
-            `\n[attached file: ${displayName}]\n\`\`\`${lang}\n${asText}\n\`\`\`\n`
-        );
+            resolved = await _resolveAttachment(p);
+        } catch (err) {
+            console.warn(`[attachments] resolve failed: ${err.message}`);
+            textSegments.push(`[attachment skipped: ${err.message}]`);
+            continue;
+        }
+        if (!resolved) {
+            textSegments.push('[attachment skipped: unrecognized format]');
+            continue;
+        }
+        _appendResolved({ resolved, attachments, textSegments, turnId, count });
     }
 
     return {
@@ -370,6 +544,7 @@ function classifyParts(content, turnId) {
 
 module.exports = {
     classifyParts,
+    classifyPartsAsync,
     AttachmentBudgetError,
     MODE,
 };
