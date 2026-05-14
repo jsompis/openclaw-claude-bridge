@@ -118,7 +118,7 @@ Bridge 透過 `reasoning_effort` 參數支援 Claude 的延伸思考：
 
 ## Dashboard
 
-Bridge 包含一個 React Dashboard，可在 `http://<伺服器IP>:3458/` 存取。
+Bridge 包含一個 React Dashboard，預設可在 `http://127.0.0.1:3458/` 存取。
 
 ![Dashboard 截圖](docs/dashboard-screenshot.png)
 
@@ -132,9 +132,9 @@ Bridge 包含一個 React Dashboard，可在 `http://<伺服器IP>:3458/` 存取
 
 **請求表格** — 13 欄表格顯示每個請求：時間、channel、session（顏色編碼）、恢復方式（emoji 標記：🔧 工具、💬 對話、🆕 新建、♻️ 刷新等）、prompt 大小、模型、思考等級、輸入/輸出 tokens、成本、快取命中率、耗時和狀態。每行可展開顯示活動紀錄和錯誤詳情。支援 channel 和恢復方式過濾，以及分頁。
 
-**Session 清理** — 一鍵清除超過 24 小時的 CLI sessions。
+**Session 清理** — 一鍵清除超過 24 小時的 CLI sessions。`/cleanup` 端點未設定 `DASHBOARD_PASS` 時停用；啟用後需要 Basic Auth。
 
-**密碼保護：** 設定 `DASHBOARD_PASS` 環境變數以啟用 HTTP Basic Auth（用戶名：`admin`）。如果未設定，Dashboard 開放存取。
+**密碼保護：** 設定 `DASHBOARD_PASS` 環境變數以啟用 HTTP Basic Auth（用戶名：`admin`）。Dashboard 預設只綁定 localhost。若綁定到非 loopback/LAN 介面，必須設定 `DASHBOARD_PASS`，否則 Bridge 會拒絕啟動。
 
 Dashboard 詳細架構請參閱 [docs/architecture.md](docs/architecture.md#dashboard)。
 
@@ -146,7 +146,10 @@ Dashboard 詳細架構請參閱 [docs/architecture.md](docs/architecture.md#dash
 
 | 變數名 | 必填 | 預設值 | 說明 |
 |---|---|---|---|
-| `DASHBOARD_PASS` | 否 | — | Dashboard 密碼（Basic Auth，用戶名：`admin`） |
+| `DASHBOARD_PASS` | 否 | — | Dashboard 密碼（Basic Auth，用戶名：`admin`）；同時啟用 `/cleanup` |
+| `OPENCLAW_BRIDGE_STATUS_BIND` | 否 | `127.0.0.1` | Dashboard/status 綁定地址；非 loopback 需要 `DASHBOARD_PASS` |
+| `OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS` | 否 | 未設定 | 設為 `1` 時才傳入 Claude CLI `--dangerously-skip-permissions`；僅用於可信任的本機 sandbox/headless 部署且明確需要時 |
+| `VITE_STATUS_API_TARGET` | 否 | `http://127.0.0.1:3458` | Dashboard Vite 開發代理的 `/status`、`/cleanup` 目標 |
 | `OPUS_MODEL` | 否 | `opus` | Opus 的 CLI 模型別名 |
 | `SONNET_MODEL` | 否 | `sonnet` | Sonnet 的 CLI 模型別名 |
 | `HAIKU_MODEL` | 否 | `haiku` | Haiku 的 CLI 模型別名 |
@@ -162,7 +165,7 @@ Dashboard 詳細架構請參閱 [docs/architecture.md](docs/architecture.md#dash
 | 端口 | 綁定 | 用途 |
 |---|---|---|
 | `3456` | `127.0.0.1` | OpenAI 相容 API（僅本機） |
-| `3458` | `0.0.0.0` | Dashboard（區域網絡可存取） |
+| `3458` | 預設 `127.0.0.1` | Dashboard/status；若設定 `OPENCLAW_BRIDGE_STATUS_BIND` 對 LAN 開放，必須設定 `DASHBOARD_PASS` |
 
 ---
 
@@ -267,7 +270,7 @@ systemctl --user restart openclaw-claude-bridge
 | `GET` | `/v1/models` | 3456 | 可用模型列表 |
 | `GET` | `/health` | 3456 | 健康檢查 → `{"status":"ok"}` |
 | `GET` | `/status` | 3458 | 執行時統計 JSON（運行時間、請求、sessions、活動） |
-| `POST` | `/cleanup` | 3458 | 清除超過 24 小時的 CLI sessions |
+| `POST` | `/cleanup` | 3458 | 清除超過 24 小時的 CLI sessions；未設定 `DASHBOARD_PASS` 時停用 |
 | `GET` | `/` | 3458 | Dashboard（React SPA） |
 
 ---
@@ -301,9 +304,10 @@ openclaw-claude-bridge/
 ## 安全
 
 - **Port 3456** 綁定 localhost — 外部無法存取
-- **Port 3458** 區域網絡可存取，設定 `DASHBOARD_PASS` 時以 HTTP Basic Auth 保護
+- **Port 3458** 預設綁定 localhost（`127.0.0.1`）；非 loopback/LAN 開放必須設定 `DASHBOARD_PASS`
+- **`/cleanup`** 未設定 `DASHBOARD_PASS` 時停用；啟用後需要驗證
 - **`--tools ""`** 禁用所有 Claude 原生工具 — 無主機指令執行
-- **`--dangerously-skip-permissions`** 為 headless 運作所需（沒有終端機可以確認；因為原生工具已禁用所以安全）
+- **`--dangerously-skip-permissions`** 透過 `OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS=1` 明確 opt-in；僅供可信任的本機 sandbox/headless 部署在確實需要時使用
 - **`.env`** 包含 secrets 並已 gitignore
 
 ---

@@ -124,7 +124,7 @@ When `reasoning_effort` is not provided, thinking is disabled entirely (`MAX_THI
 
 ## Dashboard
 
-The bridge includes a React dashboard accessible at `http://<server-ip>:3458/`.
+The bridge includes a React dashboard accessible at `http://127.0.0.1:3458/` by default.
 
 ![Dashboard screenshot](docs/dashboard-screenshot.png)
 
@@ -138,9 +138,9 @@ The bridge includes a React dashboard accessible at `http://<server-ip>:3458/`.
 
 **Request table** — 13-column table showing every request: time, channel, session (color-coded), resume method (emoji badges: 🔧 Tools, 💬 Chat, 🆕 New, ♻️ Refresh, etc.), prompt size, model, thinking level, input/output tokens, cost, cache hit rate, duration, and status. Rows expand to show activity logs and errors. Supports channel and resume method filtering, and pagination.
 
-**Session cleanup** — one-click button to delete CLI sessions older than 24 hours.
+**Session cleanup** — one-click button to delete CLI sessions older than 24 hours. The `/cleanup` endpoint is disabled unless `DASHBOARD_PASS` is set, and requires Basic Auth when enabled.
 
-**Password protection:** Set `DASHBOARD_PASS` in your environment to enable HTTP Basic Auth (user: `admin`). If not set, the dashboard is open.
+**Password protection:** Set `DASHBOARD_PASS` in your environment to enable HTTP Basic Auth (user: `admin`). By default the dashboard binds to localhost only. Binding to a non-loopback/LAN interface requires `DASHBOARD_PASS` or the bridge refuses to start.
 
 For detailed architecture of the dashboard, see [docs/architecture.md](docs/architecture.md#dashboard).
 
@@ -152,7 +152,10 @@ For detailed architecture of the dashboard, see [docs/architecture.md](docs/arch
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `DASHBOARD_PASS` | No | — | Dashboard password (Basic Auth, user: `admin`) |
+| `DASHBOARD_PASS` | No | — | Dashboard password (Basic Auth, user: `admin`); also enables `/cleanup` |
+| `OPENCLAW_BRIDGE_STATUS_BIND` | No | `127.0.0.1` | Dashboard/status bind address; non-loopback requires `DASHBOARD_PASS` |
+| `OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS` | No | unset | Set to `1` to pass Claude CLI `--dangerously-skip-permissions` in trusted local sandbox/headless deployments that knowingly need it |
+| `VITE_STATUS_API_TARGET` | No | `http://127.0.0.1:3458` | Dashboard Vite dev proxy target for `/status` and `/cleanup` |
 | `OPUS_MODEL` | No | `claude-opus-4-6` | Claude CLI model override for `claude-opus-4-6` |
 | `OPUS_47_MODEL` | No | `claude-opus-4-7` | Claude CLI model override for `claude-opus-4-7` |
 | `SONNET_MODEL` | No | `claude-sonnet-4-6` | Claude CLI model override for `claude-sonnet-4-6` |
@@ -169,7 +172,7 @@ For detailed architecture of the dashboard, see [docs/architecture.md](docs/arch
 | Port | Bind | Purpose |
 |---|---|---|
 | `3456` | `127.0.0.1` | OpenAI-compatible API (localhost only) |
-| `3458` | `0.0.0.0` | Dashboard (LAN accessible) |
+| `3458` | `127.0.0.1` by default | Dashboard/status server; set `OPENCLAW_BRIDGE_STATUS_BIND` for LAN exposure (requires `DASHBOARD_PASS`) |
 
 ---
 
@@ -274,7 +277,7 @@ systemctl --user restart openclaw-claude-bridge
 | `GET` | `/v1/models` | 3456 | Available model list |
 | `GET` | `/health` | 3456 | Health check → `{"status":"ok"}` |
 | `GET` | `/status` | 3458 | Runtime stats JSON (uptime, requests, sessions, activity) |
-| `POST` | `/cleanup` | 3458 | Delete CLI sessions older than 24h |
+| `POST` | `/cleanup` | 3458 | Delete CLI sessions older than 24h; disabled unless `DASHBOARD_PASS` is set |
 | `GET` | `/` | 3458 | Dashboard (React SPA) |
 
 ---
@@ -308,9 +311,10 @@ openclaw-claude-bridge/
 ## Security
 
 - **Port 3456** binds to localhost only — not reachable from outside the machine
-- **Port 3458** is LAN-accessible, protected by HTTP Basic Auth when `DASHBOARD_PASS` is set
+- **Port 3458** binds to localhost (`127.0.0.1`) by default; non-loopback/LAN exposure requires `DASHBOARD_PASS`
+- **`/cleanup`** is disabled unless `DASHBOARD_PASS` is set, and is auth-gated when enabled
 - **`--tools ""`** disables all Claude native tools — no host command execution
-- **`--dangerously-skip-permissions`** is required for headless operation (no terminal to prompt for confirmation; safe because native tools are disabled)
+- **`--dangerously-skip-permissions`** is opt-in via `OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS=1` for trusted local sandbox/headless deployments that knowingly need it
 - **`.env`** contains secrets and is gitignored
 
 ---

@@ -29,9 +29,9 @@ Every request to `POST /v1/chat/completions` goes through these stages:
 
 ```
 1. INTERCEPT     Is this a memory flush or /new startup? → return NO_REPLY
-2. IDENTIFY      Extract channel label + agent name → build routing key
+2. IDENTIFY      Extract routing signals + agent name → build routing key
 3. RATE LIMIT    Check per-channel and global concurrent limits
-4. SESSION       Three-tier lookup → resume existing or create new
+4. SESSION       Map lookup/fallback routing → resume existing or create new
 5. TRANSLATE     Convert OpenAI messages → Claude CLI text format
 6. SPAWN         Launch claude --print subprocess, pipe prompt via stdin
 7. PARSE         Read stream-json events, collect text + usage
@@ -48,12 +48,15 @@ Two types of requests are intercepted before reaching Claude:
 
 ### Identity Extraction (Step 2)
 
-The bridge extracts two identifiers from the request:
+The bridge extracts stable routing signals from the request, in priority order:
 
-- **Channel label**: Parsed from the `Conversation info (untrusted metadata)` JSON block in user messages. Format: `Guild #channel-name` for group chats, `dm:username` for DMs.
-- **Agent name**: Parsed from the `**Name:** AgentName` field in developer/system messages (injected by OC from the agent's IDENTITY.md).
+1. **Conversation label**: Parsed from the `Conversation info (untrusted metadata)` JSON block in user messages. Format: `Guild #channel-name` for group chats, `dm:username` for DMs.
+2. **`x-openclaw-session-key`**: HTTP header used by transports that preserve custom provider headers.
+3. **Inbound Context**: Parsed from the `Inbound Context (trusted metadata)` block when custom headers are dropped.
+4. **`prompt_cache_key`**: OpenAI-style request field used as a routing fallback for OpenClaw subagent/cron flows where the agent session id is carried there.
+5. **`user`**: Final fallback for raw OpenAI-compatible clients.
 
-The routing key is `channel::agentName` — this ensures agents sharing a Discord channel each get their own independent CLI session.
+The agent name is parsed from the `**Name:** AgentName` field in developer/system messages. When the active routing signal represents a conversation surface, the routing key includes the agent name so agents sharing a channel each get their own independent CLI session.
 
 ---
 
@@ -99,9 +102,9 @@ The `--system-prompt` flag replaces Claude Code's default system prompt (~15-20K
 
 ## Session Management
 
-### Three-Tier Lookup
+### Session Lookup
 
-When a request arrives, the bridge tries to find an existing CLI session to resume, in this order:
+When a request arrives, the bridge first selects a routing key from the request signals above. It then tries to find an existing CLI session to resume in this order:
 
 ```
                     ┌─────────────────────┐
@@ -136,8 +139,8 @@ When a request arrives, the bridge tries to find an existing CLI session to resu
 ```
 
 **Tier 1 — channelMap** (primary):
-- Key: `channel::agentName` composite key
-- Purpose: Group chat conversations — the most common case
+- Key: the selected routing source + label (for example `conversationLabel:channel::agent`, `inboundContext:telegram:private::agent`, or `promptCacheKey:<session-id>`)
+- Purpose: Stable session routing for normal channels, header-preserving transports, trusted inbound metadata, OpenClaw subagent/cron flows, and raw OpenAI clients
 - Populated after every successful response
 
 **Tier 2 — sessionMap** (tool loop):
@@ -145,10 +148,10 @@ When a request arrives, the bridge tries to find an existing CLI session to resu
 - Purpose: When OC sends tool results back, the bridge links them to the correct CLI session
 - Populated when Claude's response contains tool calls
 
-**Tier 3 — responseMap** (fallback):
-- Key: First 200 characters of the assistant's response text
-- Purpose: Fallback for DMs or situations where the channel label is missing
-- Less reliable but covers edge cases
+**Tier 3 — responseMap** (last fallback):
+- Key: First 200 characters of distinctive assistant response text
+- Purpose: Last-resort fallback when the structured routing signals and tool-call id do not identify the session
+- Collision-prone short or sentinel responses such as `NO_REPLY`, `HEARTBEAT_OK`, and `[DONE]` are ignored instead of stored or matched
 
 ### Resume vs. New Session
 
@@ -285,7 +288,7 @@ The bridge strips Claude Code CLI down to a clean, minimal language model — no
 
 ```bash
 claude --print \
-  --dangerously-skip-permissions \
+  [--dangerously-skip-permissions] \
   --output-format stream-json \
   --verbose \
   --model opus \
@@ -304,7 +307,7 @@ claude --print \
 | `--resume <uuid>` | Resume an existing session | Conversation history already on disk; only new messages sent via stdin |
 | `--system-prompt` | **Replace** the default system prompt entirely | See below |
 | `--tools ""` | Disable all native tools (Bash, Read, Write, Edit, WebSearch, etc.) | See below |
-| `--dangerously-skip-permissions` | Skip interactive confirmation prompts | No terminal in headless mode; safe because native tools are disabled |
+| `--dangerously-skip-permissions` | Skip interactive confirmation prompts | Opt-in only via `OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS=1` for trusted local sandbox/headless deployments that knowingly need it |
 
 ### System Prompt Replacement (`--system-prompt`)
 
@@ -352,7 +355,7 @@ Bridge's Claude Code CLI:
   ┌─────────────────────────────────┐
   │  Our system prompt only         │  ← agent identity + tool protocol
   │  No tools                       │  ← text output only
-  │  No prompts                     │  ← headless operation
+  │  Optional prompt skipping       │  ← opt-in for trusted headless deployments
   └─────────────────────────────────┘
 ```
 
@@ -407,6 +410,7 @@ The idle timeout in `claude.js` ensures stuck requests eventually terminate. For
 
 ```json
 {
+  "schemaVersion": 1,
   "stats": {
     "totalRequests": 142,
     "errors": 3
@@ -430,13 +434,14 @@ State is written atomically using the rename pattern:
 
 This prevents corruption if the process crashes mid-write.
 
-### Load and Prune
+### Load, Migrate, and Prune
 
 On startup:
 1. Load `state.json` if it exists
-2. For each channelMap and responseMap entry, verify the CLI session file still exists on disk
-3. Prune entries where the session file is gone
-4. Restore requestLog (last 200) and globalActivity (last 50)
+2. Read `schemaVersion`; legacy unversioned state is migrated in memory, while unknown future versions load compatible fields only
+3. For each channelMap, sessionMap, and responseMap entry, verify the CLI session file still exists on disk
+4. Prune entries where the session file is gone, and drop unsafe responseMap keys such as short/sentinel values
+5. Restore requestLog (last 200) and globalActivity (last 50)
 
 ### Session Files
 
@@ -447,7 +452,7 @@ CLI session files are stored at:
 
 On macOS, `/tmp` is a symlink to `/private/tmp`, so the bridge uses `fs.realpathSync('/tmp')` to resolve the correct path.
 
-Sessions older than 24 hours are automatically deleted on startup and can be manually cleaned via the dashboard's `/cleanup` endpoint.
+Sessions older than 24 hours are automatically deleted on startup. Manual dashboard cleanup via `POST /cleanup` is disabled unless `DASHBOARD_PASS` is set; when enabled, it requires Basic Auth.
 
 ---
 
@@ -614,7 +619,7 @@ Each row is expandable — clicking the triangle reveals the request's activity 
 
 ### Session Cleanup
 
-A "🧹 Clean Sessions" button in the Sessions section header triggers `POST /cleanup`, which deletes CLI session files older than 24 hours. The dashboard refreshes automatically after cleanup.
+A "🧹 Clean Sessions" button in the Sessions section header triggers `POST /cleanup`, which deletes CLI session files older than 24 hours. The endpoint is disabled unless `DASHBOARD_PASS` is set, and requires Basic Auth when enabled. The dashboard refreshes automatically after cleanup.
 
 ### Tech Stack
 
@@ -630,6 +635,8 @@ A "🧹 Clean Sessions" button in the Sessions section header triggers `POST /cl
 
 The dashboard is built to `dashboard/dist/` and served as static files by the Express status server. No separate process needed.
 
+During Vite development, `/status` and `/cleanup` are proxied to `VITE_STATUS_API_TARGET`, which defaults to `http://127.0.0.1:3458`.
+
 ---
 
 ## Security Model
@@ -637,19 +644,18 @@ The dashboard is built to `dashboard/dist/` and served as static files by the Ex
 ### Network Isolation
 
 - **Port 3456** (API): Bound to `127.0.0.1` — only accessible from the same machine. OpenClaw's gateway connects locally.
-- **Port 3458** (Dashboard): Bound to `0.0.0.0` — accessible on the LAN. Protected by HTTP Basic Auth when `DASHBOARD_PASS` is set.
+- **Port 3458** (Dashboard/status): Bound to `127.0.0.1` by default. Set `OPENCLAW_BRIDGE_STATUS_BIND` to a non-loopback interface only when you want LAN exposure; the bridge refuses to start in that mode unless `DASHBOARD_PASS` is set.
+- **`/cleanup`**: Disabled unless `DASHBOARD_PASS` is set, and auth-gated when enabled.
 
 ### Tool Isolation
 
 `--tools ""` disables all Claude native tools (Bash, Read, Write, Edit, WebSearch, etc.). Claude cannot execute any commands on the host. All tool execution goes through OpenClaw's controlled gateway.
 
-### Why `--dangerously-skip-permissions`
+### Optional `--dangerously-skip-permissions`
 
-Claude Code CLI normally prompts for user confirmation before taking actions. In headless proxy mode, there's no terminal. This flag disables the confirmation prompt. It's safe here because:
+Claude Code CLI may prompt for confirmation before taking actions. The bridge does **not** pass `--dangerously-skip-permissions` by default. Operators can opt in with `OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS=1` for trusted local sandbox/headless deployments that knowingly need non-interactive permission behavior.
 
-1. Native tools are completely disabled
-2. The API port is localhost-only
-3. All tool execution is delegated to OpenClaw
+Do not treat this as a blanket safety guarantee: native Claude tools remain disabled with `--tools ""`, and tool execution is still delegated to OpenClaw, but the flag intentionally lowers Claude CLI's own permission prompt barrier.
 
 ### Secrets
 
