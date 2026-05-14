@@ -180,6 +180,7 @@ function debugRawRequest(requestId, req, messages) {
         const sample = {
             headers,
             user: typeof req.body?.user === 'string' ? req.body.user.slice(0, 120) : null,
+            prompt_cache_key: typeof req.body?.prompt_cache_key === 'string' ? req.body.prompt_cache_key.slice(0, 120) : null,
             messages: (messages || []).slice(0, 6).map((m) => ({
                 role: m.role,
                 text: messageContentText(m).slice(0, 500),
@@ -413,7 +414,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     pushLog(logEntry); // appear in dashboard immediately as 'pending'
 
     try {
-        const { messages = [], tools = [], model = 'claude-opus-4-7', stream = true, reasoning_effort, user } = req.body;
+        const { messages = [], tools = [], model = 'claude-opus-4-7', stream = true, reasoning_effort, user, prompt_cache_key } = req.body;
         debugRawRequest(requestId, req, messages);
         stats.lastModel = model;
         logEntry.model = model;
@@ -451,10 +452,23 @@ app.post('/v1/chat/completions', async (req, res) => {
         if (tools.length === 0) {
             const promptLen = messages.reduce((s, m) => s + JSON.stringify(m.content || '').length, 0);
             const mfChannel = extractConversationLabel(messages);
+            const mfInboundContext = extractInboundContext(messages);
+            const mfPromptCacheKey = typeof prompt_cache_key === 'string' && prompt_cache_key.trim() ? prompt_cache_key.trim() : null;
+            const mfOpenAiUser = typeof user === 'string' && user.trim() ? user.trim() : null;
             const mfAgent = extractAgentName(messages);
-            logEntry.channel = mfChannel ? mfChannel.replace(/^Guild\s+/, '').slice(0, 30) : null;
+            let mfRoutingSource = null;
+            const mfDisplayChannel = mfChannel
+                || (mfInboundContext ? (mfInboundContext.channel || mfInboundContext.label) : null)
+                || (mfPromptCacheKey ? `session:${mfPromptCacheKey}` : null)
+                || (mfOpenAiUser ? `user:${mfOpenAiUser}` : null);
+            if (mfChannel) mfRoutingSource = 'conversationLabel';
+            else if (mfInboundContext?.label) mfRoutingSource = 'inboundContext';
+            else if (mfPromptCacheKey) mfRoutingSource = 'promptCacheKey';
+            else if (mfOpenAiUser) mfRoutingSource = 'openAiUser';
+            logEntry.channel = mfDisplayChannel ? mfDisplayChannel.replace(/^Guild\s+/, '').slice(0, 40) : null;
+            logEntry.routingSource = mfRoutingSource;
             logEntry.agent = mfAgent || null;
-            console.log(`[${requestId}] MEMORY FLUSH intercepted: tools=0 channel="${mfChannel}" agent="${mfAgent}" promptLen≈${promptLen}, returning NO_REPLY`);
+            console.log(`[${requestId}] MEMORY FLUSH intercepted: tools=0 channel="${mfDisplayChannel}" source=${mfRoutingSource || 'none'} agent="${mfAgent}" promptLen≈${promptLen}, returning NO_REPLY`);
             logEntry.status = 'ok';
             logEntry.resumeMethod = 'memflush';
             logEntry.promptLen = promptLen;
@@ -492,6 +506,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         const inboundLabel = inboundContext?.label || null;
         const agentName = extractAgentName(messages);
         const openAiUser = typeof user === 'string' && user.trim() ? user.trim() : null;
+        const promptCacheKey = typeof prompt_cache_key === 'string' && prompt_cache_key.trim() ? prompt_cache_key.trim() : null;
         let routingSource = null;
         let routingLabel = null;
         if (convLabel) {
@@ -503,6 +518,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         } else if (inboundLabel) {
             routingSource = 'inboundContext';
             routingLabel = agentName ? `${inboundLabel}::${agentName}` : inboundLabel;
+        } else if (promptCacheKey) {
+            routingSource = 'promptCacheKey';
+            routingLabel = promptCacheKey;
         } else if (openAiUser) {
             routingSource = 'openAiUser';
             routingLabel = openAiUser;
@@ -512,7 +530,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             : null;
         logEntry.routingSource = routingSource;
         if (routingKey) {
-            console.log(`[${requestId}] OC channel: "${convLabel || ocSessionKey || inboundLabel || openAiUser}" source=${routingSource} agent: "${agentName || '(none)'}" routingKey: "${routingKey}"`);
+            console.log(`[${requestId}] OC channel: "${convLabel || ocSessionKey || inboundLabel || promptCacheKey || openAiUser}" source=${routingSource} agent: "${agentName || '(none)'}" routingKey: "${routingKey}"`);
         }
 
         // --- Per-channel and global concurrent limits ---
@@ -721,7 +739,11 @@ app.post('/v1/chat/completions', async (req, res) => {
         logEntry.promptLen = promptText.length;
         logEntry.cliSessionId = sessionId.slice(0, 8);
         logEntry.resumed = isResume;
-        const displayChannel = convLabel || (routingSource === 'openclawSessionKey' ? `session:${ocSessionKey}` : null) || (routingSource === 'inboundContext' ? (inboundContext?.channel || inboundLabel) : null) || (routingSource === 'openAiUser' ? `user:${openAiUser}` : null);
+        const displayChannel = convLabel
+            || (routingSource === 'openclawSessionKey' ? `session:${ocSessionKey}` : null)
+            || (routingSource === 'inboundContext' ? (inboundContext?.channel || inboundLabel) : null)
+            || (routingSource === 'promptCacheKey' ? `session:${promptCacheKey}` : null)
+            || (routingSource === 'openAiUser' ? `user:${openAiUser}` : null);
         logEntry.channel = displayChannel ? displayChannel.replace(/^Guild\s+/, '').slice(0, 40) : null;
         logEntry.agent = agentName || null;
         console.log(`[${requestId}] model=${model} tools=${tools.length} promptLen=${promptText.length} resume=${isResume}`);
