@@ -47,7 +47,7 @@ function parseLooseJson(jsonText) {
 }
 
 function isAllowedToolName(name, allowedToolNames) {
-    if (!allowedToolNames || allowedToolNames.size === 0) return true;
+    if (!allowedToolNames) return true;
     return allowedToolNames.has(name);
 }
 

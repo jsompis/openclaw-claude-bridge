@@ -1,0 +1,130 @@
+'use strict';
+
+const assert = require('assert');
+const http = require('http');
+const path = require('path');
+
+const { buildToolInstructions, bridgeAllowedToolNames, filterBridgeAllowedTools, isBridgeAllowedToolName } = require('../src/tools');
+
+delete process.env.DASHBOARD_PASS;
+process.env.OPENCLAW_BRIDGE_ENV_FILE = path.join(__dirname, '..', '.env.test-missing');
+
+const { app, __setRunClaudeForTests } = require('../src/server');
+
+function listen(expressApp) {
+  return new Promise((resolve) => {
+    const server = expressApp.listen(0, '127.0.0.1');
+    server.once('listening', () => resolve(server));
+  });
+}
+
+function close(server) {
+  return new Promise((resolve, reject) => {
+    server.close((err) => err ? reject(err) : resolve());
+  });
+}
+
+function postJson(port, body) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: '/v1/chat/completions',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        let json = null;
+        try { json = data ? JSON.parse(data) : null; } catch (_) {}
+        resolve({ status: res.statusCode, body: data, json });
+      });
+    });
+    req.on('error', reject);
+    req.end(JSON.stringify(body));
+  });
+}
+
+function functionTool(name, description) {
+  return {
+    type: 'function',
+    function: {
+      name,
+      description,
+      parameters: { type: 'object', properties: {} },
+    },
+  };
+}
+
+async function main() {
+  const gatewayTool = functionTool('gateway', 'internal gateway control');
+  const sessionsSendTool = functionTool('sessions_send', 'internal session send');
+  const safeTool = functionTool('read', 'read a file');
+  const tools = [gatewayTool, sessionsSendTool, safeTool];
+
+  assert.strictEqual(isBridgeAllowedToolName('gateway'), false);
+  assert.strictEqual(isBridgeAllowedToolName('sessions_send'), false);
+  assert.strictEqual(isBridgeAllowedToolName('read'), true);
+  assert.deepStrictEqual(filterBridgeAllowedTools(tools).map(t => t.function.name), ['read']);
+  assert.deepStrictEqual(Array.from(bridgeAllowedToolNames(tools)), ['read']);
+
+  const instructions = buildToolInstructions(tools);
+  assert.ok(!instructions.includes('gateway'), 'prompt instructions must hide gateway');
+  assert.ok(!instructions.includes('sessions_send'), 'prompt instructions must hide sessions_send');
+  assert.ok(instructions.includes('**read**'), 'prompt instructions must retain safe tool');
+  assert.strictEqual(buildToolInstructions([gatewayTool]), '', 'blocked-only tools should produce no tool instructions');
+
+  const calls = [];
+  __setRunClaudeForTests(async (systemPrompt, promptText) => {
+    calls.push({ systemPrompt, promptText });
+    if (promptText.includes('blocked tool')) {
+      return {
+        text: '<tool_call>{"name":"gateway","arguments":{"action":"restart"}}</tool_call>',
+        usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
+      };
+    }
+    return {
+      text: '<tool_call>{"name":"read","arguments":{"path":"README.md"}}</tool_call>',
+      usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
+    };
+  });
+
+  const server = await listen(app);
+  try {
+    const port = server.address().port;
+    const blocked = await postJson(port, {
+      model: 'claude-opus-4-7',
+      stream: false,
+      tools,
+      messages: [{ role: 'user', content: 'please emit blocked tool' }],
+    });
+    assert.strictEqual(blocked.status, 200, blocked.body);
+    assert.strictEqual(calls.length, 1);
+    assert.ok(!calls[0].systemPrompt.includes('gateway'), 'server prompt must hide gateway');
+    assert.ok(!calls[0].systemPrompt.includes('sessions_send'), 'server prompt must hide sessions_send');
+    assert.ok(calls[0].systemPrompt.includes('**read**'), 'server prompt must keep safe tool');
+    assert.ok(!blocked.json.choices[0].message.tool_calls, 'blocked gateway call must not be executable');
+    assert.strictEqual(blocked.json.choices[0].message.content, '');
+    assert.strictEqual(blocked.json.choices[0].finish_reason, 'stop');
+
+    const safe = await postJson(port, {
+      model: 'claude-opus-4-7',
+      stream: false,
+      tools,
+      messages: [{ role: 'user', content: 'please emit safe tool' }],
+    });
+    assert.strictEqual(safe.status, 200, safe.body);
+    assert.strictEqual(calls.length, 2);
+    assert.strictEqual(safe.json.choices[0].finish_reason, 'tool_calls');
+    assert.strictEqual(safe.json.choices[0].message.tool_calls.length, 1);
+    assert.strictEqual(safe.json.choices[0].message.tool_calls[0].function.name, 'read');
+  } finally {
+    __setRunClaudeForTests(null);
+    await close(server);
+  }
+
+  console.log('bridge tool allowlist tests passed');
+}
+
+main().catch(err => { console.error(err); process.exit(1); });

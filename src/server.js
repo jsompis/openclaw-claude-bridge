@@ -6,7 +6,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 
 const { convertMessagesAsync, convertMessagesCompactAsync, extractNewMessagesAsync, extractNewUserMessagesAsync } = require('./convert');
-const { buildToolInstructions } = require('./tools');
+const { bridgeAllowedToolNames, buildToolInstructions } = require('./tools');
 const { runClaude } = require('./claude');
 const { cleanResponseText, hasInternalBridgeMarkup, parseToolCallsDetailed, redactSensitivePreview } = require('./tool-parser');
 
@@ -161,7 +161,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             });
         }
 
-        const allowedToolNames = new Set(tools.map(t => t.function?.name || t.name).filter(Boolean));
+        const allowedToolNames = bridgeAllowedToolNames(tools);
         if (tools.length > 0) {
             const toolNames = Array.from(allowedToolNames);
             console.log(`[${requestId}] tools:[${toolNames.join(',')}]`);

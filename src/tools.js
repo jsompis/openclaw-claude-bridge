@@ -1,8 +1,26 @@
 'use strict';
 
-// Gateway-internal tools that should not be listed as available to Claude.
-// These are OC infrastructure tools, not user-facing.
+// Gateway-internal tools that should not be listed as available to Claude or
+// accepted back from bridge-emitted <tool_call> markup. These are OC
+// infrastructure tools, not user-facing.
 const GATEWAY_BLOCKED = new Set(['sessions_send', 'sessions_spawn', 'gateway']);
+
+function toolName(tool) {
+    return tool?.function?.name || tool?.name || '';
+}
+
+function isBridgeAllowedToolName(name) {
+    return Boolean(name) && !GATEWAY_BLOCKED.has(name);
+}
+
+function filterBridgeAllowedTools(tools) {
+    if (!Array.isArray(tools)) return [];
+    return tools.filter(tool => isBridgeAllowedToolName(toolName(tool)));
+}
+
+function bridgeAllowedToolNames(tools) {
+    return new Set(filterBridgeAllowedTools(tools).map(toolName).filter(Boolean));
+}
 
 /**
  * Build tool instructions for the system prompt.
@@ -13,7 +31,8 @@ const GATEWAY_BLOCKED = new Set(['sessions_send', 'sessions_spawn', 'gateway']);
  * OpenClaw executes the tools and sends results back.
  */
 function buildToolInstructions(tools) {
-    if (!tools || tools.length === 0) return '';
+    const allowedTools = filterBridgeAllowedTools(tools);
+    if (allowedTools.length === 0) return '';
 
     const lines = [
         '',
@@ -45,10 +64,8 @@ function buildToolInstructions(tools) {
         'Available tools:',
     ];
 
-    for (const tool of tools) {
-        const name = tool.function?.name || tool.name;
-        if (!name) continue;
-        if (GATEWAY_BLOCKED.has(name)) continue;
+    for (const tool of allowedTools) {
+        const name = toolName(tool);
         const desc = tool.function?.description || tool.description || '';
         lines.push(`- **${name}**: ${desc}`);
     }
@@ -56,4 +73,9 @@ function buildToolInstructions(tools) {
     return lines.join('\n');
 }
 
-module.exports = { buildToolInstructions };
+module.exports = {
+    bridgeAllowedToolNames,
+    buildToolInstructions,
+    filterBridgeAllowedTools,
+    isBridgeAllowedToolName,
+};

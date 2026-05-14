@@ -37,6 +37,12 @@ const allowed = new Set(['exec', 'read']);
 }
 
 {
+    const result = parseToolCallsDetailed('<tool_call>{"name":"gateway","arguments":{}}</tool_call>', { allowedToolNames: new Set() });
+    assert.strictEqual(result.calls.length, 0);
+    assert.strictEqual(result.errors[0].error, 'tool_not_allowed');
+}
+
+{
     const result = parseToolCallsDetailed('<tool_call>{"name":"exec","arguments":{}}</tool_char><tool_call>{"name":"read","arguments":{}}</tool_char>', { allowedToolNames: allowed });
     assert.strictEqual(result.calls.length, 0);
     assert.strictEqual(result.repaired, false);
