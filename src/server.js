@@ -685,7 +685,8 @@ app.post('/v1/chat/completions', async (req, res) => {
         logEntry.promptLen = promptText.length;
         logEntry.cliSessionId = sessionId.slice(0, 8);
         logEntry.resumed = isResume;
-        logEntry.channel = convLabel ? convLabel.replace(/^Guild\s+/, '').slice(0, 30) : null;
+        const displayChannel = convLabel || (routingSource === 'openclawSessionKey' ? `session:${ocSessionKey}` : null) || (routingSource === 'openAiUser' ? `user:${openAiUser}` : null);
+        logEntry.channel = displayChannel ? displayChannel.replace(/^Guild\s+/, '').slice(0, 40) : null;
         logEntry.agent = agentName || null;
         console.log(`[${requestId}] model=${model} tools=${tools.length} promptLen=${promptText.length} resume=${isResume}`);
 
