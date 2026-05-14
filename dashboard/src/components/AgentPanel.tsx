@@ -78,7 +78,7 @@ export function AgentPanel({ group, isAllAgents }: AgentPanelProps) {
           (e.inputTokens || 0) +
           (e.cacheWriteTokens || 0) +
           (e.cacheReadTokens || 0)
-        const ctxMax = (e as any).contextWindow || CTX_DEFAULT
+        const ctxMax = e.contextWindow || CTX_DEFAULT
         map.set(sid, {
           sid,
           used,
@@ -184,6 +184,7 @@ export function AgentPanel({ group, isAllAgents }: AgentPanelProps) {
               <th className="py-1.5 px-2.5 font-medium sticky top-0 bg-card z-10">Channel</th>
               <th className="py-1.5 px-2.5 font-medium sticky top-0 bg-card z-10">Session</th>
               <th className="py-1.5 px-2.5 font-medium sticky top-0 bg-card z-10">Resume</th>
+              <th className="py-1.5 px-2.5 font-medium sticky top-0 bg-card z-10">Route</th>
               <th className="py-1.5 px-2.5 font-medium sticky top-0 bg-card z-10 text-right">Prompt</th>
               <th className="py-1.5 px-2.5 font-medium sticky top-0 bg-card z-10">Model</th>
               <th className="py-1.5 px-2.5 font-medium sticky top-0 bg-card z-10">Think</th>
@@ -217,6 +218,7 @@ export function AgentPanel({ group, isAllAgents }: AgentPanelProps) {
                   sessionId={e.cliSessionId}
                   resumed={e.resumed}
                   resume={rm}
+                  route={e.routingSource || "—"}
                   prompt={K(e.promptLen || 0)}
                   model={fmtModel(e.model)}
                   think={thk}
@@ -289,12 +291,12 @@ export function AgentPanel({ group, isAllAgents }: AgentPanelProps) {
 }
 
 function RequestRow({
-  time, channel, sessionId, resumed, resume, prompt, model,
+  time, channel, sessionId, resumed, resume, route, prompt, model,
   think, thinking, inTokens, outTokens, cost, cache, duration,
   status, activity, error,
 }: {
   time: string; channel: string; sessionId: string | null; resumed: boolean
-  resume: string; prompt: string; model: string; think: string
+  resume: string; route: string; prompt: string; model: string; think: string
   thinking: boolean; inTokens: string; outTokens: string; cost: string
   cache: string; duration: string; status: string; activity: string[]
   error: string | null
@@ -319,6 +321,7 @@ function RequestRow({
           {resumed ? "\u21a9 " : "\u2295 "}{sessionId || "\u2014"}
         </td>
         <td className={`py-1.5 px-2.5 whitespace-nowrap ${resumeColorClass(resume)}`}>{resume}</td>
+        <td className="py-1.5 px-2.5 whitespace-nowrap text-muted-foreground">{route}</td>
         <td className={`py-1.5 px-2.5 whitespace-nowrap text-muted-foreground ${mono} ${r}`}>{prompt}</td>
         <td className="py-1.5 px-2.5 whitespace-nowrap text-muted-foreground">{model}</td>
         <td className={`py-1.5 px-2.5 whitespace-nowrap ${thinkColorClass(thinking)}`}>{think}</td>
@@ -331,14 +334,14 @@ function RequestRow({
       </tr>
       {expanded && activity.length > 0 && (
         <tr>
-          <td colSpan={13} className="px-2.5 py-1 pl-9 text-[0.68rem] text-muted-foreground/60 leading-[1.7] border-b border-border">
+          <td colSpan={14} className="px-2.5 py-1 pl-9 text-[0.68rem] text-muted-foreground/60 leading-[1.7] border-b border-border">
             {activity.map((a, i) => <div key={i}>{a}</div>)}
           </td>
         </tr>
       )}
       {error && (
         <tr>
-          <td colSpan={13} className="px-2.5 py-0.5 pl-9 text-[0.68rem] text-red-500 border-b border-border">
+          <td colSpan={14} className="px-2.5 py-0.5 pl-9 text-[0.68rem] text-red-500 border-b border-border">
             {error}
           </td>
         </tr>

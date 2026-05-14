@@ -165,17 +165,48 @@ function contentKey(text) {
     return text.slice(0, 200);
 }
 
+function headerValue(value) {
+    if (Array.isArray(value)) return value.find(v => typeof v === 'string' && v.trim())?.trim() || null;
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function debugRawRequest(requestId, req, messages) {
+    if (process.env.CLAUDE_BRIDGE_DEBUG_RAW_REQUEST !== '1') return;
+    try {
+        const headers = {};
+        for (const key of ['x-openclaw-session-key', 'user-agent', 'content-type']) {
+            if (req.headers[key]) headers[key] = headerValue(req.headers[key]) || String(req.headers[key]);
+        }
+        const sample = {
+            headers,
+            user: typeof req.body?.user === 'string' ? req.body.user.slice(0, 120) : null,
+            messages: (messages || []).slice(0, 6).map((m) => ({
+                role: m.role,
+                text: messageContentText(m).slice(0, 500),
+            })),
+        };
+        console.warn(`[${requestId}] DEBUG_RAW_REQUEST ${JSON.stringify(sample)}`);
+    } catch (err) {
+        console.warn(`[${requestId}] DEBUG_RAW_REQUEST failed: ${err?.message || err}`);
+    }
+}
+
+function messageContentText(msg) {
+    return typeof msg.content === 'string' ? msg.content
+        : Array.isArray(msg.content) ? msg.content.filter(p => p && (p.type === 'text' || typeof p.text === 'string')).map(p => p.text || '').join('\n')
+        : '';
+}
+
 /**
  * Extract OC conversation label from messages.
- * Looks for "Conversation info (untrusted metadata)" JSON block in user messages.
- * Returns the conversation_label string, or null if not found (e.g. DMs).
+ * Looks for "Conversation info (untrusted metadata)" JSON block in text-bearing
+ * user/developer/system messages. Returns the conversation_label string, or null
+ * if not found (e.g. DMs).
  */
 function extractConversationLabel(messages) {
     for (const msg of messages) {
-        if (msg.role !== 'user') continue;
-        const content = typeof msg.content === 'string' ? msg.content
-            : Array.isArray(msg.content) ? msg.content.filter(p => p.type === 'text').map(p => p.text).join('\n')
-            : '';
+        if (!['user', 'developer', 'system'].includes(msg.role)) continue;
+        const content = messageContentText(msg);
         const match = content.match(/Conversation info \(untrusted metadata\):\s*```json\s*(\{[\s\S]*?\})\s*```/);
         if (match) {
             try {
@@ -196,9 +227,7 @@ function extractConversationLabel(messages) {
 function extractAgentName(messages) {
     for (const msg of messages) {
         if (msg.role !== 'developer' && msg.role !== 'system') continue;
-        const text = typeof msg.content === 'string' ? msg.content
-            : Array.isArray(msg.content) ? msg.content.filter(p => p.type === 'text').map(p => p.text).join('\n')
-            : '';
+        const text = messageContentText(msg);
         const match = text.match(/\*\*Name:\*\*\s*(.+)/);
         if (match) {
             const name = match[1].trim();
@@ -210,14 +239,7 @@ function extractAgentName(messages) {
 
 function messageText(msg) {
     if (!msg) return '';
-    if (typeof msg.content === 'string') return msg.content;
-    if (Array.isArray(msg.content)) {
-        return msg.content
-            .filter(p => p && (p.type === 'text' || typeof p.text === 'string'))
-            .map(p => p.text || '')
-            .join('\n');
-    }
-    return '';
+    return messageContentText(msg);
 }
 
 /**
@@ -330,7 +352,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     console.log(`[${requestId}] POST /v1/chat/completions`);
     // Debug: log OC session identifiers
-    const ocSessionKey = req.headers['x-openclaw-session-key'] || null;
+    const ocSessionKey = headerValue(req.headers['x-openclaw-session-key']);
     const ocUser = req.body?.user || null;
     if (ocSessionKey || ocUser) {
         console.log(`[${requestId}] OC identifiers: session-key=${ocSessionKey} user=${ocUser}`);
@@ -357,11 +379,13 @@ app.post('/v1/chat/completions', async (req, res) => {
         effort: null,
         thinking: false,
         resumeMethod: null,
+        routingSource: null,
     };
     pushLog(logEntry); // appear in dashboard immediately as 'pending'
 
     try {
         const { messages = [], tools = [], model = 'claude-opus-4-7', stream = true, reasoning_effort, user } = req.body;
+        debugRawRequest(requestId, req, messages);
         stats.lastModel = model;
         logEntry.model = model;
         logEntry.contextWindow = getContextWindow(model);
@@ -428,17 +452,31 @@ app.post('/v1/chat/completions', async (req, res) => {
         // Extract conversation identity.
         // Priority:
         // 1. OpenClaw-style conversation metadata + agent name, for multi-agent channels.
-        // 2. OpenAI-compatible `user` field, for OpenAI clients and raw API tests.
-        // Without the `user` fallback, plain OpenAI requests never hit channelMap and
-        // every turn starts a fresh Claude CLI session.
+        // 2. OpenClaw session key header, which is stable for a chat session even when
+        //    metadata blocks are absent or move roles.
+        // 3. OpenAI-compatible `user` field, for OpenAI clients and raw API tests.
+        // Without these stable fallbacks, every turn starts a fresh Claude CLI session.
         const convLabel = extractConversationLabel(messages);
         const agentName = extractAgentName(messages);
         const openAiUser = typeof user === 'string' && user.trim() ? user.trim() : null;
-        const routingKey = convLabel
-            ? (agentName ? `${convLabel}::${agentName}` : convLabel)
-            : (openAiUser ? `openai-user:${openAiUser}` : null);
+        let routingSource = null;
+        let routingLabel = null;
+        if (convLabel) {
+            routingSource = 'conversationLabel';
+            routingLabel = agentName ? `${convLabel}::${agentName}` : convLabel;
+        } else if (ocSessionKey) {
+            routingSource = 'openclawSessionKey';
+            routingLabel = ocSessionKey;
+        } else if (openAiUser) {
+            routingSource = 'openAiUser';
+            routingLabel = openAiUser;
+        }
+        const routingKey = routingLabel
+            ? `${routingSource}:${routingLabel}`
+            : null;
+        logEntry.routingSource = routingSource;
         if (routingKey) {
-            console.log(`[${requestId}] OC channel: "${convLabel}" agent: "${agentName || '(none)'}" routingKey: "${routingKey}"`);
+            console.log(`[${requestId}] OC channel: "${convLabel || ocSessionKey || openAiUser}" source=${routingSource} agent: "${agentName || '(none)'}" routingKey: "${routingKey}"`);
         }
 
         // --- Per-channel and global concurrent limits ---
@@ -907,7 +945,8 @@ app.post('/v1/chat/completions', async (req, res) => {
             const prevEntry = channelMap.get(routingKey);
             channelMap.set(routingKey, {
                 sessionId,
-                createdAt: Date.now(),
+                createdAt: prevEntry?.createdAt || Date.now(),
+                routingSource,
                 lastCompactionHash: logEntry.pendingCompactionHash ?? prevEntry?.lastCompactionHash ?? null,
             });
             if (logEntry.pendingCompactionHash) delete logEntry.pendingCompactionHash;
@@ -982,6 +1021,7 @@ statusApp.get('/status', (req, res) => {
             label: label.replace(/^Guild\s+/, '').slice(0, 40),
             sessionId: val.sessionId.slice(0, 8),
             age: Math.floor((Date.now() - val.createdAt) / 1000),
+            routingSource: val.routingSource || null,
         })),
         contextWindows: {
             'claude-opus-4-7': getContextWindow('claude-opus-4-7'),

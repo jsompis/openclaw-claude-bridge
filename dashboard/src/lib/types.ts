@@ -20,6 +20,8 @@ export interface LogEntry {
   effort: string | null
   thinking: boolean
   resumeMethod: string | null
+  routingSource?: string | null
+  contextWindow?: number | null
 }
 
 export interface ActivityItem {
@@ -32,6 +34,7 @@ export interface ChannelInfo {
   label: string
   sessionId: string
   age: number
+  routingSource?: string | null
 }
 
 export interface StatusData {
