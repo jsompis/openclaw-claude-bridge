@@ -80,6 +80,8 @@ function getContextWindow(modelId) {
  */
 
 const IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_MS) || 120000; // 2 min idle = dead
+const CLAUDE_SKIP_PERMISSIONS_ENV = 'OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS';
+let warnedClaudeSkipPermissions = false;
 
 /**
  * Map OC reasoning_effort levels to Claude CLI --effort levels.
@@ -96,6 +98,65 @@ function mapEffort(reasoningEffort) {
         'xhigh':   'max',
     };
     return map[reasoningEffort] || null;
+}
+
+function shouldSkipClaudePermissions(env = process.env) {
+    const raw = env[CLAUDE_SKIP_PERMISSIONS_ENV];
+    if (typeof raw !== 'string') return false;
+    return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
+function maybeWarnClaudeSkipPermissions() {
+    if (warnedClaudeSkipPermissions) return;
+    warnedClaudeSkipPermissions = true;
+    console.warn(`[claude-bridge] WARNING: Claude CLI --dangerously-skip-permissions enabled by ${CLAUDE_SKIP_PERMISSIONS_ENV}`);
+}
+
+function buildClaudeArgs({ hasAttachments, model, isResume, sessionId, systemPrompt, reasoningEffort }, env = process.env) {
+    const args = [
+        '--print',
+        '--output-format', 'stream-json',
+        '--verbose',
+    ];
+
+    if (shouldSkipClaudePermissions(env)) {
+        args.splice(1, 0, '--dangerously-skip-permissions');
+        maybeWarnClaudeSkipPermissions();
+    }
+
+    if (hasAttachments) {
+        args.push('--input-format', 'stream-json');
+    }
+
+    // Always pass --model (not persisted in session)
+    args.push('--model', model);
+
+    if (isResume && sessionId) {
+        // Resume existing session — conversation history already in session
+        args.push('--resume', sessionId);
+    } else if (sessionId) {
+        // New session
+        args.push('--session-id', sessionId);
+    }
+
+    // Replace Claude Code default system prompt (removes ~15-20KB of irrelevant noise)
+    if (systemPrompt) {
+        args.push('--system-prompt', systemPrompt);
+    }
+
+    // Always disable Claude built-in tools. Also force MCP isolation so
+    // ambient local MCP servers cannot leak into the bridge session and
+    // bypass OpenClaw's tool loop.
+    args.push('--tools', '');
+    args.push('--strict-mcp-config');
+
+    // Map OC reasoning_effort → Claude CLI --effort
+    const effort = mapEffort(reasoningEffort);
+    if (effort) {
+        args.push('--effort', effort);
+    }
+
+    return args;
 }
 
 // --- Dynamic auto-scrub for OC detection bypass ---
@@ -216,43 +277,8 @@ function runClaude(systemPrompt, promptText, modelId, onChunk, signal, reasoning
         // (images/PDFs) — the CLI doesn't accept attachments in text mode.
         const hasAttachments = Array.isArray(attachmentBlocks) && attachmentBlocks.length > 0;
 
-        const args = [
-            '--print',
-            '--dangerously-skip-permissions',
-            '--output-format', 'stream-json',
-            '--verbose',
-        ];
-        if (hasAttachments) {
-            args.push('--input-format', 'stream-json');
-        }
-
-        // Always pass --model (not persisted in session)
-        args.push('--model', model);
-
-        if (isResume && sessionId) {
-            // Resume existing session — conversation history already in session
-            args.push('--resume', sessionId);
-        } else if (sessionId) {
-            // New session
-            args.push('--session-id', sessionId);
-        }
-
-        // Replace Claude Code default system prompt (removes ~15-20KB of irrelevant noise)
-        if (systemPrompt) {
-            args.push('--system-prompt', systemPrompt);
-        }
-
-        // Always disable Claude built-in tools. Also force MCP isolation so
-        // ambient local MCP servers cannot leak into the bridge session and
-        // bypass OpenClaw's tool loop.
-        args.push('--tools', '');
-        args.push('--strict-mcp-config');
-
-        // Map OC reasoning_effort → Claude CLI --effort
+        const args = buildClaudeArgs({ hasAttachments, model, isResume, sessionId, systemPrompt, reasoningEffort });
         const effort = mapEffort(reasoningEffort);
-        if (effort) {
-            args.push('--effort', effort);
-        }
 
         const env = { ...process.env };
 
@@ -421,4 +447,4 @@ function handleEvent(event, onChunk, setFull, setUsage) {
     }
 }
 
-module.exports = { runClaude, getContextWindow, clearSessionAlias };
+module.exports = { runClaude, getContextWindow, clearSessionAlias, shouldSkipClaudePermissions, buildClaudeArgs };
