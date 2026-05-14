@@ -6,10 +6,11 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node scripts/test-tool-parser.js && node scripts/test-routing.js && node scripts/test-security.js",
+    "test": "node scripts/test-tool-parser.js && node scripts/test-routing.js && node scripts/test-security.js && node scripts/test-attachment-allowlist.js",
     "test:tool-parser": "node scripts/test-tool-parser.js",
     "test:routing": "node scripts/test-routing.js",
     "test:security": "node scripts/test-security.js",
+    "test:attachment-allowlist": "node scripts/test-attachment-allowlist.js",
     "postinstall": "cd dashboard && npm install --ignore-scripts && npm run build"
   },
   "license": "MIT",

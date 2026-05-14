@@ -123,6 +123,57 @@ function _parseDataUrl(url) {
     return { mime, buf };
 }
 
+function _expandHome(inputPath) {
+    if (typeof inputPath !== 'string') return inputPath;
+    if (!inputPath.startsWith('~')) return inputPath;
+    const home = process.env.HOME;
+    if (!home) return inputPath;
+    return path.join(home, inputPath.slice(1));
+}
+
+function resolveForPolicy(inputPath) {
+    const expanded = _expandHome(inputPath);
+    const resolved = path.resolve(expanded);
+    try {
+        return fs.realpathSync(resolved);
+    } catch {
+        return resolved;
+    }
+}
+
+function parseAttachmentRoots() {
+    const raw = process.env.OPENCLAW_BRIDGE_ATTACHMENT_ROOTS || '';
+    return raw
+        .split(':')
+        .map(s => s.trim())
+        .filter(Boolean)
+        .map(resolveForPolicy);
+}
+
+function isPathAllowed(absPath, roots) {
+    for (const root of roots) {
+        const rel = path.relative(root, absPath);
+        if (rel === '' || (rel && !rel.startsWith('..') && !path.isAbsolute(rel))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function _resolveAllowedLocalPath(inputPath) {
+    const roots = parseAttachmentRoots();
+    if (!roots.length) {
+        console.warn(`[attachments] local file path rejected (no allowlist): ${inputPath}`);
+        return null;
+    }
+    const policyPath = resolveForPolicy(inputPath);
+    if (!isPathAllowed(policyPath, roots)) {
+        console.warn(`[attachments] local file path rejected (outside allowlist): ${inputPath}`);
+        return null;
+    }
+    return policyPath;
+}
+
 function _downloadSync(url) {
     const tmp = path.join(ATTACH_DIR, `.dl-${crypto.randomBytes(6).toString('hex')}.tmp`);
     try {
@@ -167,9 +218,8 @@ function _resolveAttachment(part) {
                 mime = _mimeFromExt(_safeExt(name));
             } catch {}
         } else if (url.startsWith('/') || url.startsWith('~') || url.startsWith('./')) {
-            const abs = url.startsWith('~')
-                ? path.join(process.env.HOME, url.slice(1))
-                : path.resolve(url);
+            const abs = _resolveAllowedLocalPath(url);
+            if (!abs) return null;
             if (!fs.existsSync(abs)) return null;
             bytes = fs.readFileSync(abs);
             name = path.basename(abs);
@@ -194,7 +244,8 @@ function _resolveAttachment(part) {
                 try { name = path.basename(new URL(f.file_url).pathname); } catch {}
             }
         } else if (f.path) {
-            const abs = path.resolve(f.path);
+            const abs = _resolveAllowedLocalPath(f.path);
+            if (!abs) return null;
             if (!fs.existsSync(abs)) return null;
             bytes = fs.readFileSync(abs);
             if (!name) name = path.basename(abs);
