@@ -20,7 +20,9 @@ const path = require('path');
 const { sessionFileExists, deleteSessionFile } = require('./session-cleanup');
 const { clearSessionAlias } = require('./claude');
 
-const STATE_FILE = path.join(__dirname, '..', 'state.json');
+const STATE_SCHEMA_VERSION = 1;
+const STATE_DIR = process.env.OPENCLAW_BRIDGE_STATE_DIR || path.join(__dirname, '..');
+const STATE_FILE = path.join(STATE_DIR, 'state.json');
 
 // Circular buffers
 const MAX_LOG = 200;
@@ -121,15 +123,36 @@ function purgeCliSession(cliSessionId) {
 }
 
 // --- Persistence ---
+function isPlainObject(value) {
+    return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isSessionBackedEntry(entry) {
+    return Array.isArray(entry)
+        && entry.length >= 2
+        && typeof entry[0] === 'string'
+        && isPlainObject(entry[1])
+        && typeof entry[1].sessionId === 'string'
+        && sessionFileExists(entry[1].sessionId);
+}
+
+function loadBoundedArray(target, value, max) {
+    if (!Array.isArray(value)) return;
+    target.push(...value.slice(-max));
+}
+
 function saveState() {
     try {
         const data = {
+            schemaVersion: STATE_SCHEMA_VERSION,
             stats: { totalRequests: stats.totalRequests, errors: stats.errors },
             channelMap: Array.from(channelMap.entries()),
+            sessionMap: Array.from(sessionMap.entries()),
             responseMap: Array.from(responseMap.entries()),
             requestLog,
             globalActivity,
         };
+        fs.mkdirSync(STATE_DIR, { recursive: true });
         const tmp = STATE_FILE + '.tmp';
         fs.writeFileSync(tmp, JSON.stringify(data));
         fs.renameSync(tmp, STATE_FILE);
@@ -142,16 +165,27 @@ function loadState() {
     try {
         if (!fs.existsSync(STATE_FILE)) return;
         const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+        if (!isPlainObject(data)) {
+            console.warn('[persist] Failed to load state: state.json root is not an object');
+            return;
+        }
 
-        if (data.stats) {
+        if (data.schemaVersion === undefined) {
+            console.warn('[persist] Loading legacy unversioned state');
+        } else if (data.schemaVersion !== STATE_SCHEMA_VERSION) {
+            console.warn(`[persist] Unknown state schemaVersion ${data.schemaVersion}; loading compatible fields only`);
+        }
+
+        if (isPlainObject(data.stats)) {
             stats.totalRequests = data.stats.totalRequests || 0;
             stats.errors = data.stats.errors || 0;
         }
 
-        let restored = 0, pruned = 0;
-        if (data.channelMap) {
-            for (const [key, val] of data.channelMap) {
-                if (sessionFileExists(val.sessionId)) {
+        let restored = 0, sessionRestored = 0, pruned = 0, responseRestored = 0, responsePruned = 0;
+        if (Array.isArray(data.channelMap)) {
+            for (const entry of data.channelMap) {
+                if (isSessionBackedEntry(entry)) {
+                    const [key, val] = entry;
                     channelMap.set(key, val);
                     restored++;
                 } else {
@@ -160,24 +194,37 @@ function loadState() {
             }
         }
 
-        if (data.responseMap) {
-            for (const [key, val] of data.responseMap) {
-                const safeKey = contentKey(key);
-                if (safeKey && sessionFileExists(val.sessionId)) {
-                    responseMap.set(safeKey, val);
+        if (Array.isArray(data.sessionMap)) {
+            for (const entry of data.sessionMap) {
+                if (isSessionBackedEntry(entry)) {
+                    const [key, val] = entry;
+                    sessionMap.set(key, val);
+                    sessionRestored++;
                 }
             }
         }
 
-        if (data.requestLog) {
-            requestLog.push(...data.requestLog.slice(-MAX_LOG));
+        if (Array.isArray(data.responseMap)) {
+            for (const entry of data.responseMap) {
+                if (!Array.isArray(entry) || entry.length < 2) {
+                    responsePruned++;
+                    continue;
+                }
+                const [key, val] = entry;
+                const safeKey = contentKey(key);
+                if (safeKey && isPlainObject(val) && typeof val.sessionId === 'string' && sessionFileExists(val.sessionId)) {
+                    responseMap.set(safeKey, val);
+                    responseRestored++;
+                } else {
+                    responsePruned++;
+                }
+            }
         }
 
-        if (data.globalActivity) {
-            globalActivity.push(...data.globalActivity.slice(-MAX_ACTIVITY));
-        }
+        loadBoundedArray(requestLog, data.requestLog, MAX_LOG);
+        loadBoundedArray(globalActivity, data.globalActivity, MAX_ACTIVITY);
 
-        console.log(`[persist] Loaded: ${restored} channels, ${pruned} pruned (session gone), ${requestLog.length} log entries, ${globalActivity.length} activity`);
+        console.log(`[persist] Loaded schema=${data.schemaVersion || 'legacy'}: ${restored} channels, ${sessionRestored} sessions, ${responseRestored} responses, ${pruned + responsePruned} pruned, ${requestLog.length} log entries, ${globalActivity.length} activity`);
     } catch (err) {
         console.warn(`[persist] Failed to load state: ${err.message}`);
     }
@@ -186,6 +233,8 @@ function loadState() {
 loadState();
 
 module.exports = {
+    STATE_SCHEMA_VERSION,
+    STATE_DIR,
     STATE_FILE,
     MAX_LOG,
     MAX_ACTIVITY,
