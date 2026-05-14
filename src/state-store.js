@@ -29,6 +29,12 @@ const MAX_ACTIVITY = 50;
 // Memory cleanup TTL (not for session lifecycle — just garbage collection)
 const MEMORY_GC_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+// ResponseMap is only a best-effort fallback. Avoid short/sentinel replies that
+// commonly collide across unrelated sessions (NO_REPLY, HEARTBEAT_OK, etc.).
+const RESPONSE_MAP_MIN_CHARS = 50;
+const RESPONSE_MAP_KEY_MAX_CHARS = 200;
+const RESPONSE_MAP_SENTINELS = new Set(['NO_REPLY', 'HEARTBEAT_OK', '[DONE]']);
+
 // Concurrency limits
 const MAX_PER_CHANNEL = parseInt(process.env.MAX_PER_CHANNEL) || 2;
 const MAX_GLOBAL = parseInt(process.env.MAX_GLOBAL) || 20;
@@ -61,10 +67,28 @@ function pushActivity(requestId, msg) {
     if (globalActivity.length > MAX_ACTIVITY) globalActivity.shift();
 }
 
-/** First 200 chars of text as a lookup key. */
+/** Normalize text before deciding whether it is safe as a responseMap key. */
+function normalizeResponseMapText(text) {
+    if (typeof text !== 'string') return null;
+    const normalized = text.trim().replace(/\s+/g, ' ');
+    return normalized || null;
+}
+
+/** Whether text is distinctive enough for responseMap fallback routing. */
+function isResponseMapEligible(text) {
+    const normalized = normalizeResponseMapText(text);
+    if (!normalized) return false;
+    if (RESPONSE_MAP_SENTINELS.has(normalized.toUpperCase())) return false;
+    if (normalized.length < RESPONSE_MAP_MIN_CHARS) return false;
+    if (!/[\p{L}\p{N}]/u.test(normalized)) return false;
+    return true;
+}
+
+/** Safe first 200 chars of normalized text as a lookup key. */
 function contentKey(text) {
-    if (!text) return null;
-    return text.slice(0, 200);
+    const normalized = normalizeResponseMapText(text);
+    if (!isResponseMapEligible(normalized)) return null;
+    return normalized.slice(0, RESPONSE_MAP_KEY_MAX_CHARS);
 }
 
 /** Garbage-collect orphaned in-memory entries older than MEMORY_GC_TTL_MS. */
@@ -138,8 +162,9 @@ function loadState() {
 
         if (data.responseMap) {
             for (const [key, val] of data.responseMap) {
-                if (sessionFileExists(val.sessionId)) {
-                    responseMap.set(key, val);
+                const safeKey = contentKey(key);
+                if (safeKey && sessionFileExists(val.sessionId)) {
+                    responseMap.set(safeKey, val);
                 }
             }
         }
@@ -177,6 +202,7 @@ module.exports = {
     pushLog,
     pushActivity,
     contentKey,
+    isResponseMapEligible,
     gcMemory,
     purgeCliSession,
     saveState,
