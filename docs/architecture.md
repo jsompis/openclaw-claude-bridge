@@ -367,18 +367,27 @@ The CLI is effectively reduced to: "accept text in, produce text out, with sessi
 
 ### Claude CLI Subprocess
 
-Each request spawns a Claude CLI subprocess using the flags described above.
+By default, each request spawns a Claude CLI subprocess using the flags described above.
 
 The subprocess runs with `cwd=/tmp` and receives the conversation prompt via stdin.
+
+### Phase 1 Live Claude Process (Experimental)
+
+`OPENCLAW_BRIDGE_CLAUDE_LIVE=1` enables the Phase 1 live-process path. Instead of spawning a process for every request, the bridge keeps one stream-json Claude process per bridge session and serializes turns through that process.
+
+Phase 1 stays inside the existing security boundary: the live process uses the same model, system prompt, `--tools ""`, and `--strict-mcp-config` isolation as the per-request path; OpenClaw remains the only tool executor. If those process arguments change, the bridge stops the old live process and starts a new one.
+
+Idle live processes are shut down after `OPENCLAW_BRIDGE_CLAUDE_LIVE_IDLE_MS`; the default is `600000` ms (10 minutes). This live idle shutdown is separate from the active-request stdout idle timeout below.
 
 ### Timeouts
 
 | Type | Duration | Purpose |
 |---|---|---|
-| **Idle timeout** | 2 min (configurable) | Kill if no stdout activity for this long. Reset on every output chunk. |
-| **Hard timeout** | 20 min | Absolute maximum runtime regardless of activity. |
+| **Active-request idle timeout** | 2 min (configurable with `IDLE_TIMEOUT_MS`) | Kill if no stdout activity for this long during an active request. Reset on every output chunk. |
+| **Live process idle shutdown** | 10 min (configurable with `OPENCLAW_BRIDGE_CLAUDE_LIVE_IDLE_MS`) | Stop an opt-in Phase 1 live Claude process after this many ms with no requests. |
+| **Hard timeout** | 20 min | Absolute maximum runtime regardless of activity for the default per-request path. |
 
-The idle timeout catches stuck processes while allowing long tool chains (which produce output) to continue. The hard timeout is a safety net.
+The active-request idle timeout catches stuck processes while allowing long tool chains (which produce output) to continue. The hard timeout is a safety net for the default per-request path.
 
 ### Client Disconnect
 

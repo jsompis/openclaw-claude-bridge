@@ -1,5 +1,7 @@
 'use strict';
 
+require('./env-loader').loadDefaultEnv();
+
 const http = require('http');
 const { app, statusApp, stats, saveState } = require('./server');
 

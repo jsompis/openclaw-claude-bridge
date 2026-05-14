@@ -81,7 +81,23 @@ function getContextWindow(modelId) {
 
 const IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_MS) || 120000; // 2 min idle = dead
 const CLAUDE_SKIP_PERMISSIONS_ENV = 'OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS';
+const CLAUDE_LIVE_ENV = 'OPENCLAW_BRIDGE_CLAUDE_LIVE';
+const CLAUDE_LIVE_IDLE_MS_ENV = 'OPENCLAW_BRIDGE_CLAUDE_LIVE_IDLE_MS';
+const DEFAULT_CLAUDE_LIVE_IDLE_MS = 600_000; // 10 min idle shutdown for opt-in live processes
 let warnedClaudeSkipPermissions = false;
+
+function parsePositiveIntegerEnv(env, name, defaultValue) {
+    const raw = env[name];
+    if (typeof raw !== 'string' || raw.trim() === '') return defaultValue;
+    const parsed = Number.parseInt(raw.trim(), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
+function truthyEnv(env, name) {
+    const raw = env[name];
+    if (typeof raw !== 'string') return false;
+    return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
 
 /**
  * Map OC reasoning_effort levels to Claude CLI --effort levels.
@@ -101,9 +117,15 @@ function mapEffort(reasoningEffort) {
 }
 
 function shouldSkipClaudePermissions(env = process.env) {
-    const raw = env[CLAUDE_SKIP_PERMISSIONS_ENV];
-    if (typeof raw !== 'string') return false;
-    return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+    return truthyEnv(env, CLAUDE_SKIP_PERMISSIONS_ENV);
+}
+
+function shouldUseClaudeLive(env = process.env) {
+    return truthyEnv(env, CLAUDE_LIVE_ENV);
+}
+
+function getClaudeLiveIdleMs(env = process.env) {
+    return parsePositiveIntegerEnv(env, CLAUDE_LIVE_IDLE_MS_ENV, DEFAULT_CLAUDE_LIVE_IDLE_MS);
 }
 
 function maybeWarnClaudeSkipPermissions() {
@@ -157,6 +179,258 @@ function buildClaudeArgs({ hasAttachments, model, isResume, sessionId, systemPro
     }
 
     return args;
+}
+
+function buildClaudeLiveArgs({ model, isResume, sessionId, systemPrompt, reasoningEffort }, env = process.env) {
+    // Live mode keeps stdin open, so it always uses stream-json input even when
+    // the current turn has no attachments.
+    return buildClaudeArgs({ hasAttachments: true, model, isResume, sessionId, systemPrompt, reasoningEffort }, env);
+}
+
+function buildStreamJsonUserMessage(promptText, attachmentBlocks) {
+    const contentBlocks = [];
+    if (promptText) {
+        contentBlocks.push({ type: 'text', text: promptText });
+    }
+    for (const b of attachmentBlocks || []) {
+        contentBlocks.push(b);
+    }
+    return {
+        type: 'user',
+        message: {
+            role: 'user',
+            content: contentBlocks,
+        },
+    };
+}
+
+function writePromptToClaudeStdin(proc, promptText, attachmentBlocks, hasAttachments) {
+    if (hasAttachments) {
+        proc.stdin.write(JSON.stringify(buildStreamJsonUserMessage(promptText, attachmentBlocks)) + '\n');
+    } else {
+        proc.stdin.write(promptText);
+    }
+}
+
+class ClaudeLiveProcess {
+    constructor({ key, model, isResume, sessionId, systemPrompt, reasoningEffort }) {
+        this.key = key;
+        this.sessionId = sessionId;
+        this.signature = JSON.stringify({ model, systemPrompt: systemPrompt || '', reasoningEffort: reasoningEffort || '' });
+        this.liveIdleMs = getClaudeLiveIdleMs();
+        this.queue = Promise.resolve();
+        this.current = null;
+        this.buffer = '';
+        this.stderrText = '';
+        this.closed = false;
+        this.activeIdleTimer = null;
+        this.liveIdleTimer = null;
+
+        const args = buildClaudeLiveArgs({ model, isResume, sessionId, systemPrompt, reasoningEffort });
+        const env = { ...process.env };
+        if (!reasoningEffort) {
+            env.MAX_THINKING_TOKENS = '0';
+        }
+
+        console.log(`[claude.js] Spawning live: ${CLAUDE_BIN} ${args.slice(0, 7).join(' ')} ... model=${model} resume=${!!isResume} liveIdleMs=${this.liveIdleMs}`);
+        this.proc = spawn(CLAUDE_BIN, args, {
+            cwd: '/tmp',
+            env,
+            stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        this.proc.stdout.on('data', (chunk) => this.onStdout(chunk));
+        this.proc.stderr.on('data', (data) => this.onStderr(data));
+        this.proc.on('close', (code) => this.onClose(code));
+        this.proc.on('error', (err) => this.onError(err));
+        this.scheduleLiveIdleShutdown();
+    }
+
+    request(promptText, attachmentBlocks, onChunk, signal) {
+        const run = () => this.runOne(promptText, attachmentBlocks, onChunk, signal);
+        const next = this.queue.then(run, run);
+        this.queue = next.catch(() => {});
+        return next;
+    }
+
+    runOne(promptText, attachmentBlocks, onChunk, signal) {
+        if (this.closed) {
+            return Promise.reject(new Error('Claude live process is closed'));
+        }
+        clearTimeout(this.liveIdleTimer);
+        this.stderrText = '';
+
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            let abortHandler = null;
+            const cleanup = () => {
+                this.clearActiveIdle();
+                if (signal && abortHandler) {
+                    signal.removeEventListener('abort', abortHandler);
+                }
+            };
+            const finishReject = (err) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                this.current = null;
+                reject(err);
+            };
+            const finishResolve = () => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                const fullText = this.current.fullText;
+                const fullUsage = this.current.fullUsage;
+                const detail = this.stderrText ? `: ${this.stderrText.split('\n').slice(-3).join(' | ')}` : '';
+                this.current = null;
+                this.scheduleLiveIdleShutdown();
+
+                const text = typeof fullText === 'string' ? fullText.trim() : '';
+                if (!text && (fullUsage.output_tokens ?? 0) === 0) {
+                    reject(new Error(`Claude returned empty response${detail}`));
+                } else {
+                    resolve({ text: fullText, usage: fullUsage });
+                }
+            };
+
+            this.current = {
+                onChunk,
+                fullText: '',
+                fullUsage: { input_tokens: 0, output_tokens: 0 },
+                resolve: finishResolve,
+                reject: finishReject,
+            };
+
+            abortHandler = () => {
+                this.stop('Client disconnected');
+                finishReject(new Error('Client disconnected'));
+            };
+            if (signal) {
+                if (signal.aborted) return abortHandler();
+                signal.addEventListener('abort', abortHandler, { once: true });
+            }
+
+            this.resetActiveIdle();
+            try {
+                this.proc.stdin.write(JSON.stringify(buildStreamJsonUserMessage(promptText, attachmentBlocks)) + '\n');
+            } catch (err) {
+                finishReject(new Error(`Failed to write to Claude live process: ${err.message}`));
+            }
+        });
+    }
+
+    resetActiveIdle() {
+        this.clearActiveIdle();
+        this.activeIdleTimer = setTimeout(() => {
+            const reason = `Idle timeout (${IDLE_TIMEOUT_MS / 1000}s no activity)`;
+            this.stop(reason);
+            if (this.current) this.current.reject(new Error(reason));
+        }, IDLE_TIMEOUT_MS);
+    }
+
+    clearActiveIdle() {
+        clearTimeout(this.activeIdleTimer);
+        this.activeIdleTimer = null;
+    }
+
+    scheduleLiveIdleShutdown() {
+        clearTimeout(this.liveIdleTimer);
+        this.liveIdleTimer = setTimeout(() => {
+            this.stop(`Live idle shutdown (${this.liveIdleMs}ms no requests)`);
+        }, this.liveIdleMs);
+        this.liveIdleTimer.unref?.();
+    }
+
+    onStdout(chunk) {
+        if (this.current) this.resetActiveIdle();
+        this.buffer += chunk.toString();
+        const lines = this.buffer.split('\n');
+        this.buffer = lines.pop();
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            let event;
+            try {
+                event = JSON.parse(trimmed);
+            } catch {
+                continue;
+            }
+            if (!this.current) continue;
+            handleEvent(
+                event,
+                this.current.onChunk,
+                (text) => { this.current.fullText = text; },
+                (u) => { this.current.fullUsage = u; },
+            );
+            if (event.type === 'result') {
+                this.current.resolve();
+            }
+        }
+    }
+
+    onStderr(data) {
+        const msg = data.toString().trim();
+        if (msg) {
+            this.stderrText += (this.stderrText ? '\n' : '') + msg;
+            console.error(`[claude live stderr] ${msg}`);
+        }
+    }
+
+    onClose(code) {
+        this.closed = true;
+        clearTimeout(this.liveIdleTimer);
+        this.clearActiveIdle();
+        liveProcessMap.delete(this.key);
+        if (this.current) {
+            const detail = this.stderrText ? `: ${this.stderrText.split('\n').slice(-3).join(' | ')}` : '';
+            this.current.reject(new Error(`Claude live process exited with code ${code}${detail}`));
+            this.current = null;
+        }
+    }
+
+    onError(err) {
+        this.closed = true;
+        clearTimeout(this.liveIdleTimer);
+        this.clearActiveIdle();
+        liveProcessMap.delete(this.key);
+        if (this.current) {
+            this.current.reject(new Error(`Failed to spawn Claude live process: ${err.message}`));
+            this.current = null;
+        }
+    }
+
+    stop(reason) {
+        if (this.closed) return;
+        console.log(`[claude.js] Stopping live Claude process session=${this.sessionId?.slice?.(0, 8) || 'unknown'} reason=${reason}`);
+        this.closed = true;
+        clearTimeout(this.liveIdleTimer);
+        this.clearActiveIdle();
+        liveProcessMap.delete(this.key);
+        try { this.proc.kill('SIGTERM'); } catch {}
+        setTimeout(() => { try { this.proc.kill('SIGKILL'); } catch {} }, 3000).unref?.();
+    }
+}
+
+const liveProcessMap = new Map();
+
+function runClaudeLive({ systemPrompt, promptText, model, onChunk, signal, reasoningEffort, sessionId, isResume, attachmentBlocks }) {
+    if (!sessionId) {
+        return Promise.reject(new Error('Claude live mode requires a sessionId'));
+    }
+    const key = sessionId;
+    const signature = JSON.stringify({ model, systemPrompt: systemPrompt || '', reasoningEffort: reasoningEffort || '' });
+    let live = liveProcessMap.get(key);
+    if (live && (live.closed || live.signature !== signature)) {
+        live.stop(live.signature !== signature ? 'live argument signature changed' : 'live process closed');
+        live = null;
+    }
+    if (!live) {
+        live = new ClaudeLiveProcess({ key, model, isResume, sessionId, systemPrompt, reasoningEffort });
+        liveProcessMap.set(key, live);
+    }
+    return live.request(promptText, attachmentBlocks, onChunk, signal);
 }
 
 // --- Dynamic auto-scrub for OC detection bypass ---
@@ -273,6 +547,15 @@ function runClaude(systemPrompt, promptText, modelId, onChunk, signal, reasoning
     return new Promise((resolve, reject) => {
         const model = resolveModel(modelId);
 
+        if (shouldUseClaudeLive()) {
+            return runClaudeLive({ systemPrompt, promptText, model, onChunk, signal, reasoningEffort, sessionId, isResume, attachmentBlocks })
+                .then(({ text, usage }) => {
+                    if (text) text = restoreInbound(text, alias, aliasLower, sessionId);
+                    resolve({ text, usage });
+                })
+                .catch(reject);
+        }
+
         // Stream-json input mode is required when we have attachment blocks
         // (images/PDFs) — the CLI doesn't accept attachments in text mode.
         const hasAttachments = Array.isArray(attachmentBlocks) && attachmentBlocks.length > 0;
@@ -324,29 +607,11 @@ function runClaude(systemPrompt, promptText, modelId, onChunk, signal, reasoning
         const hardTimer = setTimeout(() => kill(`Hard timeout (${MAX_RUN_MS / 60000}min)`), MAX_RUN_MS);
 
         // Write conversation to stdin
-        if (hasAttachments) {
-            // Stream-json input: one user message with text + image/document blocks.
-            // The prior conversation transcript is embedded as a single big text
-            // block; the attachments come last so they're clearly the "current"
-            // input the user is asking about.
-            const contentBlocks = [];
-            if (promptText) {
-                contentBlocks.push({ type: 'text', text: promptText });
-            }
-            for (const b of attachmentBlocks) {
-                contentBlocks.push(b);
-            }
-            const streamMsg = {
-                type: 'user',
-                message: {
-                    role: 'user',
-                    content: contentBlocks,
-                },
-            };
-            proc.stdin.write(JSON.stringify(streamMsg) + '\n');
-        } else {
-            proc.stdin.write(promptText);
-        }
+        // Stream-json input: one user message with text + image/document blocks.
+        // The prior conversation transcript is embedded as a single big text
+        // block; the attachments come last so they're clearly the "current"
+        // input the user is asking about.
+        writePromptToClaudeStdin(proc, promptText, attachmentBlocks, hasAttachments);
         proc.stdin.end();
 
         let fullText = '';
@@ -447,4 +712,14 @@ function handleEvent(event, onChunk, setFull, setUsage) {
     }
 }
 
-module.exports = { runClaude, getContextWindow, clearSessionAlias, shouldSkipClaudePermissions, buildClaudeArgs };
+module.exports = {
+    runClaude,
+    getContextWindow,
+    clearSessionAlias,
+    shouldSkipClaudePermissions,
+    shouldUseClaudeLive,
+    getClaudeLiveIdleMs,
+    buildClaudeArgs,
+    buildClaudeLiveArgs,
+    DEFAULT_CLAUDE_LIVE_IDLE_MS,
+};

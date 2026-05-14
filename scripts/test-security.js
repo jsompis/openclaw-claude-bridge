@@ -44,6 +44,10 @@ function request(port, method, urlPath, headers = {}) {
 
 (async function testCleanupRequiresAuth() {
   // Use a high port and load the statusApp directly to avoid binding the real ports.
+  // Point .env loading at a missing file so this read-only test remains independent
+  // of the developer's real repo-root .env.
+  delete process.env.DASHBOARD_PASS;
+  process.env.OPENCLAW_BRIDGE_ENV_FILE = path.join(REPO, '.env.test-missing');
   const { statusApp } = require(path.join(REPO, 'src', 'server'));
   const server = statusApp.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));

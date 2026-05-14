@@ -2,6 +2,10 @@
 
 const assert = require('assert');
 const http = require('http');
+const path = require('path');
+
+delete process.env.DASHBOARD_PASS;
+process.env.OPENCLAW_BRIDGE_ENV_FILE = path.join(__dirname, '..', '.env.test-missing');
 
 const { app, statusApp, __setRunClaudeForTests } = require('../src/server');
 

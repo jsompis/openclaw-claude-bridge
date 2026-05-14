@@ -1,5 +1,7 @@
 'use strict';
 
+require('./env-loader').loadDefaultEnv();
+
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 

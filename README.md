@@ -99,6 +99,12 @@ Session state survives restarts — mappings and request history are saved to `s
 
 For more details on the three-tier session lookup and edge cases, see [docs/architecture.md](docs/architecture.md).
 
+### Phase 1 Live Claude Process (Experimental)
+
+By default, each request still uses a fresh `claude --print` subprocess. Phase 1 live mode is explicitly opt-in via `OPENCLAW_BRIDGE_CLAUDE_LIVE=1` and keeps one stream-json Claude process alive per bridge session so follow-up turns can reuse the same process.
+
+Phase 1 scope is intentionally narrow: it preserves the same model/system-prompt/tool isolation flags, serializes requests per live process, keeps OpenClaw as the only tool executor, and shuts down idle live processes after `OPENCLAW_BRIDGE_CLAUDE_LIVE_IDLE_MS` (default `600000` ms / 10 minutes).
+
 ### Tool Calling
 
 The bridge reads the `tools` array from OpenClaw's request and dynamically generates tool-calling instructions that get injected into Claude's system prompt. Claude outputs `<tool_call>` XML blocks, which the bridge converts into standard OpenAI `tool_calls`.
@@ -150,8 +156,11 @@ For detailed architecture of the dashboard, see [docs/architecture.md](docs/arch
 
 ### Environment Variables
 
+At startup the bridge loads the repo-root `.env` file before importing modules that read configuration. Values already present in the OS/service environment are not overwritten. The loader supports simple `KEY=VALUE` lines, blank lines, comments, and single/double quoted values; it does not print loaded secrets. Set `OPENCLAW_BRIDGE_ENV_FILE` only for tests or unusual deployments that need a different env-file path.
+
 | Variable | Required | Default | Description |
 |---|---|---|---|
+| `OPENCLAW_BRIDGE_ENV_FILE` | No | repo `.env` | Optional env-file path override for tests/unusual deployments |
 | `DASHBOARD_PASS` | No | — | Dashboard password (Basic Auth, user: `admin`); also enables `/cleanup` |
 | `OPENCLAW_BRIDGE_STATUS_BIND` | No | `127.0.0.1` | Dashboard/status bind address; non-loopback requires `DASHBOARD_PASS` |
 | `OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS` | No | unset | Set to `1` to pass Claude CLI `--dangerously-skip-permissions` in trusted local sandbox/headless deployments that knowingly need it |
@@ -160,7 +169,9 @@ For detailed architecture of the dashboard, see [docs/architecture.md](docs/arch
 | `OPUS_47_MODEL` | No | `claude-opus-4-7` | Claude CLI model override for `claude-opus-4-7` |
 | `SONNET_MODEL` | No | `claude-sonnet-4-6` | Claude CLI model override for `claude-sonnet-4-6` |
 | `HAIKU_MODEL` | No | `claude-haiku-4-5` | Claude CLI model override for `claude-haiku-4-5` |
-| `IDLE_TIMEOUT_MS` | No | `120000` | Kill CLI subprocess after this many ms of no output |
+| `IDLE_TIMEOUT_MS` | No | `120000` | Kill an active CLI request after this many ms of no stdout activity |
+| `OPENCLAW_BRIDGE_CLAUDE_LIVE` | No | unset/off | Experimental Phase 1 opt-in: keep one live Claude CLI process per bridge session instead of spawning per request |
+| `OPENCLAW_BRIDGE_CLAUDE_LIVE_IDLE_MS` | No | `600000` | Phase 1 live Claude process idle shutdown duration in ms (10 minutes by default) |
 | `OPENCLAW_BRIDGE_PORT` | No | `3456` | API server port |
 | `OPENCLAW_BRIDGE_STATUS_PORT` | No | `3458` | Dashboard port |
 | `CLAUDE_BIN` | No | `claude` | Path to Claude Code CLI binary |
