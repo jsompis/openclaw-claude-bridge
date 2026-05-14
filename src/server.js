@@ -8,6 +8,12 @@ const { buildToolInstructions } = require('./tools');
 const { runClaude } = require('./claude');
 const { cleanResponseText, hasInternalBridgeMarkup, parseToolCallsDetailed, redactSensitivePreview } = require('./tool-parser');
 
+let runClaudeImpl = runClaude;
+
+function __setRunClaudeForTests(fn) {
+    runClaudeImpl = fn || runClaude;
+}
+
 const {
     extractRoutingSignals,
     pickRouting,
@@ -451,7 +457,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         let finalText;
         let finalUsage = { input_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 0, cost_usd: 0 };
         try {
-            ({ text: finalText, usage: finalUsage } = await runClaude(combinedSystemPrompt, promptText, model, onChunk, ac.signal, reasoning_effort, sessionId, isResume, attachmentBlocks));
+            ({ text: finalText, usage: finalUsage } = await runClaudeImpl(combinedSystemPrompt, promptText, model, onChunk, ac.signal, reasoning_effort, sessionId, isResume, attachmentBlocks));
         } catch (err) {
             const errMessage = err?.message || 'Unknown Claude error';
             const emptyCompletion = /empty response/i.test(errMessage);
@@ -496,7 +502,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 logEntry.promptLen = promptText.length;
                 console.log(`[${requestId}] Retry path: new session=${sessionId.slice(0, 8)} promptLen=${promptText.length}`);
                 try {
-                    ({ text: finalText, usage: finalUsage } = await runClaude(combinedSystemPrompt, promptText, model, onChunk, ac.signal, reasoning_effort, sessionId, false, attachmentBlocks));
+                    ({ text: finalText, usage: finalUsage } = await runClaudeImpl(combinedSystemPrompt, promptText, model, onChunk, ac.signal, reasoning_effort, sessionId, false, attachmentBlocks));
                 } catch (retryErr) {
                     console.error(`[${requestId}] Retry also failed: ${retryErr.message}`);
                     logEntry.status = 'error';
@@ -632,4 +638,4 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 });
 
-module.exports = { app, statusApp, stats, saveState };
+module.exports = { app, statusApp, stats, saveState, __setRunClaudeForTests };
