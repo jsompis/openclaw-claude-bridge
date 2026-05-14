@@ -219,6 +219,34 @@ function extractConversationLabel(messages) {
     return null;
 }
 
+
+/**
+ * Extract stable OpenClaw inbound identity from the system/developer context.
+ * Recent OpenClaw requests may omit the older Conversation info block and do
+ * not forward x-openclaw-session-key to custom OpenAI-compatible providers.
+ * The trusted inbound metadata block is still present in prompt context, so use
+ * it as a bridge-owned fallback instead of starting a fresh Claude session.
+ */
+function extractInboundContextLabel(messages) {
+    for (const msg of messages) {
+        if (!['user', 'developer', 'system'].includes(msg.role)) continue;
+        const content = messageContentText(msg);
+        const match = content.match(/Inbound Context \(trusted metadata\)[\s\S]*?```json\s*(\{[\s\S]*?\})\s*```/);
+        if (!match) continue;
+        try {
+            const meta = JSON.parse(match[1]);
+            const channel = typeof meta.channel === 'string' && meta.channel.trim() ? meta.channel.trim() : null;
+            const chatType = typeof meta.chat_type === 'string' && meta.chat_type.trim() ? meta.chat_type.trim() : null;
+            const account = typeof meta.account_id === 'string' && meta.account_id.trim() ? meta.account_id.trim() : null;
+            const provider = typeof meta.provider === 'string' && meta.provider.trim() ? meta.provider.trim() : null;
+            const surface = typeof meta.surface === 'string' && meta.surface.trim() ? meta.surface.trim() : null;
+            const parts = [channel || provider || surface, chatType, account].filter(Boolean);
+            return parts.length ? parts.join(':') : null;
+        } catch {}
+    }
+    return null;
+}
+
 /**
  * Extract agent name from developer/system messages.
  * OC includes the agent's IDENTITY.md in the system prompt, which contains "**Name:** AgentName".
@@ -452,11 +480,14 @@ app.post('/v1/chat/completions', async (req, res) => {
         // Extract conversation identity.
         // Priority:
         // 1. OpenClaw-style conversation metadata + agent name, for multi-agent channels.
-        // 2. OpenClaw session key header, which is stable for a chat session even when
-        //    metadata blocks are absent or move roles.
-        // 3. OpenAI-compatible `user` field, for OpenAI clients and raw API tests.
+        // 2. OpenClaw session key header, which is stable for a chat session when
+        //    forwarded by the provider transport.
+        // 3. OpenClaw trusted inbound metadata, which remains available in prompt
+        //    context when provider transports do not forward custom headers.
+        // 4. OpenAI-compatible `user` field, for OpenAI clients and raw API tests.
         // Without these stable fallbacks, every turn starts a fresh Claude CLI session.
         const convLabel = extractConversationLabel(messages);
+        const inboundLabel = extractInboundContextLabel(messages);
         const agentName = extractAgentName(messages);
         const openAiUser = typeof user === 'string' && user.trim() ? user.trim() : null;
         let routingSource = null;
@@ -467,6 +498,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         } else if (ocSessionKey) {
             routingSource = 'openclawSessionKey';
             routingLabel = ocSessionKey;
+        } else if (inboundLabel) {
+            routingSource = 'inboundContext';
+            routingLabel = agentName ? `${inboundLabel}::${agentName}` : inboundLabel;
         } else if (openAiUser) {
             routingSource = 'openAiUser';
             routingLabel = openAiUser;
@@ -476,7 +510,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             : null;
         logEntry.routingSource = routingSource;
         if (routingKey) {
-            console.log(`[${requestId}] OC channel: "${convLabel || ocSessionKey || openAiUser}" source=${routingSource} agent: "${agentName || '(none)'}" routingKey: "${routingKey}"`);
+            console.log(`[${requestId}] OC channel: "${convLabel || ocSessionKey || inboundLabel || openAiUser}" source=${routingSource} agent: "${agentName || '(none)'}" routingKey: "${routingKey}"`);
         }
 
         // --- Per-channel and global concurrent limits ---
@@ -685,7 +719,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         logEntry.promptLen = promptText.length;
         logEntry.cliSessionId = sessionId.slice(0, 8);
         logEntry.resumed = isResume;
-        const displayChannel = convLabel || (routingSource === 'openclawSessionKey' ? `session:${ocSessionKey}` : null) || (routingSource === 'openAiUser' ? `user:${openAiUser}` : null);
+        const displayChannel = convLabel || (routingSource === 'openclawSessionKey' ? `session:${ocSessionKey}` : null) || (routingSource === 'inboundContext' ? inboundLabel : null) || (routingSource === 'openAiUser' ? `user:${openAiUser}` : null);
         logEntry.channel = displayChannel ? displayChannel.replace(/^Guild\s+/, '').slice(0, 40) : null;
         logEntry.agent = agentName || null;
         console.log(`[${requestId}] model=${model} tools=${tools.length} promptLen=${promptText.length} resume=${isResume}`);
