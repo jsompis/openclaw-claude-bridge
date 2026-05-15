@@ -55,6 +55,54 @@ const { getContextWindow } = require('./claude');
 
 const channelQueues = new Map();
 
+const COMPACTION_PREFIX = 'The conversation history before this point was compacted into the following summary:';
+
+function hasOwn(obj, key) {
+    return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function metadataValueIndicatesMemoryFlush(value) {
+    if (typeof value !== 'string') return false;
+    const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+    return normalized === 'memory_flush'
+        || normalized === 'cache_maintenance'
+        || normalized === 'context_compaction_flush'
+        || normalized === 'openclaw_memory_flush'
+        || normalized === 'openclaw_cache_maintenance';
+}
+
+function hasExplicitMemoryFlushMetadata(body) {
+    const candidates = [
+        body?.openclaw?.request,
+        body?.openclaw?.kind,
+        body?.openclaw?.type,
+        body?.metadata?.openclaw?.request,
+        body?.metadata?.openclaw?.kind,
+        body?.metadata?.openclaw?.type,
+        body?.metadata?.request_kind,
+        body?.metadata?.turn_kind,
+        body?.metadata?.purpose,
+    ];
+    return candidates.some(metadataValueIndicatesMemoryFlush);
+}
+
+function messageHasCompactionMarker(msg) {
+    if (!['user', 'developer', 'system'].includes(msg?.role)) return false;
+    return messageText(msg).trimStart().startsWith(COMPACTION_PREFIX);
+}
+
+/**
+ * OpenClaw may emit a no-tools maintenance turn during memory/cache upkeep.
+ * Treat it as silent only when the request has an explicit maintenance marker;
+ * a plain `tools: []` chat is a valid no-tool model call and must still route
+ * to Claude.
+ */
+function isMemoryFlushNoToolRequest(body, messages, tools) {
+    const hasExplicitEmptyTools = hasOwn(body, 'tools') && Array.isArray(tools) && tools.length === 0;
+    if (!hasExplicitEmptyTools) return false;
+    return hasExplicitMemoryFlushMetadata(body) || (Array.isArray(messages) && messages.some(messageHasCompactionMarker));
+}
+
 async function runSerializedByRoutingKey(routingKey, requestId, task) {
     if (!routingKey) return task();
 
@@ -194,8 +242,9 @@ app.post('/v1/chat/completions', async (req, res) => {
             console.log(`[${requestId}] tools:[${toolNames.join(',')}]`);
         }
 
-        // Memory flush interception: OC sends tools=0 before compaction, no need to proxy to CLI
-        if (tools.length === 0) {
+        // Memory/cache maintenance interception: only explicit maintenance shapes are silent.
+        // Ordinary no-tool chats must still route to Claude.
+        if (isMemoryFlushNoToolRequest(req.body, messages, tools)) {
             const promptLen = messages.reduce((s, m) => s + JSON.stringify(m.content || '').length, 0);
             const mfSignals = extractRoutingSignals({ req, body: req.body, messages });
             const mfRouting = pickRouting(mfSignals, MEMFLUSH_PRIORITY);
@@ -204,7 +253,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 : null;
             logEntry.routingSource = mfRouting.routingSource;
             logEntry.agent = mfSignals.agentName || null;
-            console.log(`[${requestId}] MEMORY FLUSH intercepted: tools=0 channel="${mfRouting.displayChannel}" source=${mfRouting.routingSource || 'none'} agent="${mfSignals.agentName}" promptLen≈${promptLen}, returning NO_REPLY`);
+            console.log(`[${requestId}] MEMORY FLUSH intercepted: explicit no-tool maintenance channel="${mfRouting.displayChannel}" source=${mfRouting.routingSource || 'none'} agent="${mfSignals.agentName}" promptLen≈${promptLen}, returning NO_REPLY`);
             logEntry.status = 'ok';
             logEntry.resumeMethod = 'memflush';
             logEntry.promptLen = promptLen;
@@ -316,7 +365,6 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         // Context refresh: detect OC compaction via summary hash → sync CLI
         if (isResume && routingKey && channelMap.has(routingKey)) {
-            const COMPACTION_PREFIX = 'The conversation history before this point was compacted into the following summary:';
             let compactionHash = null;
             for (const m of messages) {
                 if (m.role !== 'user') continue;
@@ -664,4 +712,4 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 });
 
-module.exports = { app, statusApp, stats, saveState, __setRunClaudeForTests };
+module.exports = { app, statusApp, stats, saveState, __setRunClaudeForTests, isMemoryFlushNoToolRequest };

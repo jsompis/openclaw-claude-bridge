@@ -28,20 +28,24 @@ async function main() {
   await new Promise(resolve => server.once('listening', resolve));
   const port = server.address().port;
   try {
+    const compactionPrefix = 'The conversation history before this point was compacted into the following summary:';
+    const runTag = `test-${process.pid}-${Date.now()}`;
+    const promptCacheKey = `agent:main:subagent:${runTag}`;
+    const agentName = `CronAgent${process.pid}`;
     const base = {
       model: 'claude-opus-4-7',
       stream: false,
       tools: [],
-      messages: [{ role: 'user', content: 'memory flush probe' }],
+      messages: [{ role: 'user', content: `${compactionPrefix}\n\nmemory flush probe` }],
     };
-    await request(port, { ...base, prompt_cache_key: 'agent:main:subagent:test-123' });
-    const status = await request(port, { ...base, messages: [{ role: 'user', content: 'memory flush probe 2' }] });
+    await request(port, { ...base, prompt_cache_key: promptCacheKey });
+    const status = await request(port, { ...base, messages: [{ role: 'user', content: `${compactionPrefix}\n\nmemory flush probe 2` }] });
 
     const inbound = {
       role: 'developer',
-      content: '## Inbound Context (trusted metadata)\n```json\n{"channel":"cron","chat_type":"direct","account_id":"default"}\n```\n\n# IDENTITY.md\n- **Name:** CronAgent\n',
+      content: `## Inbound Context (trusted metadata)\n\`\`\`json\n{"channel":"cron-${runTag}","chat_type":"direct","account_id":"default"}\n\`\`\`\n\n# IDENTITY.md\n- **Name:** ${agentName}\n`,
     };
-    await request(port, { ...base, prompt_cache_key: undefined, messages: [inbound, { role: 'user', content: 'memory flush probe 3' }] });
+    await request(port, { ...base, prompt_cache_key: undefined, messages: [inbound, { role: 'user', content: `${compactionPrefix}\n\nmemory flush probe 3` }] });
     assert.strictEqual(status.status, 200);
     const state = require('../src/server').stats;
     assert.ok(state.totalRequests >= 2);
@@ -53,12 +57,12 @@ async function main() {
         }).on('error', reject);
       });
     });
-    const first = dashboard.log.find(e => e.routingSource === 'promptCacheKey');
+    const first = dashboard.log.find(e => e.routingSource === 'promptCacheKey' && e.channel === `session:${promptCacheKey}`.slice(0, 40));
     assert.ok(first, 'expected promptCacheKey-routed request in log');
-    assert.strictEqual(first.channel, 'session:agent:main:subagent:test-123'.slice(0, 40));
-    const inboundEntry = dashboard.log.find(e => e.routingSource === 'inboundContext' && e.agent === 'CronAgent');
+    assert.strictEqual(first.resumeMethod, 'memflush');
+    const inboundEntry = dashboard.log.find(e => e.routingSource === 'inboundContext' && e.agent === agentName);
     assert.ok(inboundEntry, 'expected inboundContext-routed memflush request in log');
-    assert.strictEqual(inboundEntry.channel, 'cron');
+    assert.strictEqual(inboundEntry.channel, `cron-${runTag}`);
     console.log('routing tests passed');
   } finally {
     server.close();

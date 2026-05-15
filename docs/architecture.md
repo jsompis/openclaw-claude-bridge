@@ -43,8 +43,10 @@ Every request to `POST /v1/chat/completions` goes through these stages:
 
 Two types of requests are intercepted before reaching Claude:
 
-- **Memory flush** (`tools.length === 0`): OpenClaw sends a tools-less request before context compaction. The bridge returns `NO_REPLY` immediately — no CLI session is created.
+- **Memory/cache maintenance** (explicit no-tool maintenance marker): OpenClaw can send a tools-less upkeep turn during memory/cache maintenance. The bridge returns `NO_REPLY` only when the request carries an explicit maintenance marker, such as the compaction-summary prefix or OpenClaw memory-flush metadata — no CLI session is created.
 - **/new startup**: The first request after a user runs `/new` in OC contains only a startup marker and no conversation metadata. The bridge returns `NO_REPLY` and waits for the real request that follows.
+
+A plain `tools: []` request is not enough to trigger this interception; ordinary no-tool chats still follow normal Claude routing.
 
 ### Identity Extraction (Step 2)
 
@@ -560,7 +562,7 @@ A real-time event stream showing the last 50 events. Raw server messages are par
 | 🔧 | Tool calls requested |
 | 🔄 | Session resumed |
 | ♻️ | Context refresh triggered |
-| 🧹 | Memory flush intercepted |
+| 🧹 | Explicit memory/cache maintenance intercepted |
 | ✅ | Request completed |
 | ⚠️ | Retry after CLI error |
 | ❌ | Error |
@@ -613,7 +615,7 @@ The main data table showing every request, with 13 columns:
 | 🔧 Tools | `tool_loop` | Continuing a tool-calling sequence |
 | 💬 Chat | `continuation` | Simple conversation follow-up |
 | 🆕 New | `newstart` | Fresh session from OC /new |
-| 🧹 Flush | `memflush` | Memory flush intercepted (no CLI call) |
+| 🧹 Flush | `memflush` | Explicit memory/cache maintenance intercepted (no CLI call) |
 | ♻️ Refresh | `refresh` | Context refresh after OC compaction |
 | ⚠️ Fallback | `fallback` | Resume failed, fell back to new session |
 | ▶️ Initial | — | First request (no prior session) |
