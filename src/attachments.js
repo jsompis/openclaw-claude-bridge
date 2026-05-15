@@ -36,6 +36,8 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const dns = require('dns').promises;
+const net = require('net');
 const { URL } = require('url');
 
 const MODE = process.env.OPENCLAW_BRIDGE_ATTACHMENT_MODE || 'passthrough';
@@ -43,6 +45,7 @@ const PER_TURN_CAP = parseInt(process.env.OPENCLAW_BRIDGE_ATTACHMENT_PER_TURN_CA
 const SESSION_BUDGET_MB = parseInt(process.env.OPENCLAW_BRIDGE_ATTACHMENT_SESSION_BUDGET_MB) || 500;
 const DOWNLOAD_TIMEOUT_MS = parseInt(process.env.OPENCLAW_BRIDGE_ATTACHMENT_DOWNLOAD_TIMEOUT_MS) || 30000;
 const DOWNLOAD_MAX_BYTES = parseInt(process.env.OPENCLAW_BRIDGE_ATTACHMENT_DOWNLOAD_MAX_BYTES) || 50 * 1024 * 1024;
+const DOWNLOAD_MAX_REDIRECTS = 10;
 
 // State dir for staging attachment bytes. OC bridge has no formal state dir
 // convention; default to <repo>/state/attachments unless OPENCLAW_BRIDGE_STATE_DIR
@@ -191,6 +194,196 @@ function _nameFromUrl(url) {
     }
 }
 
+function _stripIpv6Brackets(hostname) {
+    if (hostname.startsWith('[') && hostname.endsWith(']')) {
+        return hostname.slice(1, -1);
+    }
+    return hostname;
+}
+
+function _normalizeHostname(hostname) {
+    return _stripIpv6Brackets(String(hostname || '').trim().toLowerCase()).replace(/\.+$/, '');
+}
+
+function _ipv4ToInt(ip) {
+    const parts = ip.split('.').map(part => Number(part));
+    if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) {
+        return null;
+    }
+    return (((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8) + parts[3]) >>> 0;
+}
+
+function _expandIpv6(ip) {
+    let value = _stripIpv6Brackets(ip).toLowerCase();
+    const zoneIndex = value.indexOf('%');
+    if (zoneIndex !== -1) value = value.slice(0, zoneIndex);
+    if (value.includes('.')) {
+        const lastColon = value.lastIndexOf(':');
+        const ipv4 = value.slice(lastColon + 1);
+        const ipv4Int = _ipv4ToInt(ipv4);
+        if (ipv4Int === null) return null;
+        const high = ((ipv4Int >>> 16) & 0xffff).toString(16);
+        const low = (ipv4Int & 0xffff).toString(16);
+        value = value.slice(0, lastColon) + ':' + high + ':' + low;
+    }
+
+    const pieces = value.split('::');
+    if (pieces.length > 2) return null;
+    const left = pieces[0] ? pieces[0].split(':') : [];
+    const right = pieces.length === 2 && pieces[1] ? pieces[1].split(':') : [];
+    const missing = pieces.length === 2 ? 8 - left.length - right.length : 0;
+    if (missing < 0) return null;
+    const groups = pieces.length === 2
+        ? [...left, ...Array(missing).fill('0'), ...right]
+        : left;
+    if (groups.length !== 8) return null;
+
+    let out = 0n;
+    for (const group of groups) {
+        if (!/^[0-9a-f]{1,4}$/i.test(group)) return null;
+        out = (out << 16n) + BigInt(parseInt(group, 16));
+    }
+    return out;
+}
+
+function _ipv4FromMappedIpv6(ip) {
+    const big = _expandIpv6(ip);
+    if (big === null) return null;
+    if ((big >> 32n) !== 0xffffn) return null;
+    const n = Number(big & 0xffffffffn);
+    return [
+        (n >>> 24) & 0xff,
+        (n >>> 16) & 0xff,
+        (n >>> 8) & 0xff,
+        n & 0xff,
+    ].join('.');
+}
+
+function _cidrContains(ip, range) {
+    const version = net.isIP(_stripIpv6Brackets(ip));
+    if (version !== range.version) return false;
+    if (version === 4) {
+        const value = _ipv4ToInt(ip);
+        const base = _ipv4ToInt(range.address);
+        if (value === null || base === null) return false;
+        if (range.prefix === 0) return true;
+        const mask = (0xffffffff << (32 - range.prefix)) >>> 0;
+        return (value & mask) === (base & mask);
+    }
+
+    const value = _expandIpv6(ip);
+    const base = _expandIpv6(range.address);
+    if (value === null || base === null) return false;
+    if (range.prefix === 0) return true;
+    const shift = BigInt(128 - range.prefix);
+    return (value >> shift) === (base >> shift);
+}
+
+function _isBlockedHostname(hostname) {
+    const host = _normalizeHostname(hostname);
+    if (host === 'localhost' || host.endsWith('.localhost')) return true;
+    return new Set([
+        'metadata',
+        'metadata.google.internal',
+        'metadata.internal',
+        'metadata.local',
+        'instance-data',
+        'instance-data.ec2.internal',
+    ]).has(host);
+}
+
+function _isBlockedIPv4(ip) {
+    const value = _ipv4ToInt(ip);
+    if (value === null) return true;
+    const ranges = [
+        ['0.0.0.0', 8],
+        ['10.0.0.0', 8],
+        ['100.64.0.0', 10],
+        ['127.0.0.0', 8],
+        ['169.254.0.0', 16],
+        ['172.16.0.0', 12],
+        ['192.0.0.0', 24],
+        ['192.168.0.0', 16],
+        ['198.18.0.0', 15],
+        ['224.0.0.0', 4],
+        ['240.0.0.0', 4],
+    ];
+    return ranges.some(([base, prefix]) => _cidrContains(ip, { type: 'cidr', version: 4, address: base, prefix }));
+}
+
+function _isBlockedIPv6(ip) {
+    const mapped = _ipv4FromMappedIpv6(ip);
+    if (mapped) return _isBlockedIPv4(mapped);
+    const value = _expandIpv6(ip);
+    if (value === null) return true;
+    const ranges = [
+        ['::', 128],
+        ['::1', 128],
+        ['fc00::', 7],
+        ['fe80::', 10],
+        ['ff00::', 8],
+    ];
+    return ranges.some(([base, prefix]) => _cidrContains(ip, { type: 'cidr', version: 6, address: base, prefix }));
+}
+
+function _isBlockedIp(ip) {
+    const address = _normalizeHostname(ip);
+    const version = net.isIP(address);
+    if (version === 4) return _isBlockedIPv4(address);
+    if (version === 6) return _isBlockedIPv6(address);
+    return true;
+}
+
+async function _validateRemoteUrlForDownload(inputUrl) {
+    const parsed = inputUrl instanceof URL ? inputUrl : new URL(inputUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error('remote attachment URL blocked by SSRF policy: unsupported protocol ' + parsed.protocol);
+    }
+
+    const hostname = _normalizeHostname(parsed.hostname);
+    if (!hostname) {
+        throw new Error('remote attachment URL blocked by SSRF policy: missing hostname');
+    }
+    if (_isBlockedHostname(hostname)) {
+        throw new Error('remote attachment URL blocked by SSRF policy: blocked hostname ' + hostname);
+    }
+
+    if (net.isIP(hostname)) {
+        if (_isBlockedIp(hostname)) {
+            throw new Error('remote attachment URL blocked by SSRF policy: blocked address ' + hostname);
+        }
+        return;
+    }
+
+    let records;
+    try {
+        records = await dns.lookup(hostname, { all: true, verbatim: false });
+    } catch (err) {
+        throw new Error('download failed: DNS lookup failed for ' + hostname + ': ' + err.message);
+    }
+    if (!records.length) {
+        throw new Error('download failed: DNS lookup returned no addresses for ' + hostname);
+    }
+    for (const record of records) {
+        const address = _normalizeHostname(record.address);
+        if (_isBlockedIp(address)) {
+            throw new Error('remote attachment URL blocked by SSRF policy: ' + hostname + ' resolved to blocked address ' + address);
+        }
+    }
+}
+
+function _isRedirectStatus(status) {
+    return [301, 302, 303, 307, 308].includes(status);
+}
+
+async function _cancelResponseBody(response) {
+    try {
+        if (response?.body && typeof response.body.cancel === 'function') {
+            await response.body.cancel();
+        }
+    } catch {}
+}
+
 async function _download(url) {
     if (typeof fetch !== 'function') {
         throw new Error('remote attachment downloads require global fetch');
@@ -199,7 +392,23 @@ async function _download(url) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
     try {
-        const response = await fetch(url, { signal: controller.signal });
+        let currentUrl = new URL(url);
+        let response = null;
+        for (let redirects = 0; redirects <= DOWNLOAD_MAX_REDIRECTS; redirects++) {
+            await _validateRemoteUrlForDownload(currentUrl);
+            response = await fetch(currentUrl, { signal: controller.signal, redirect: 'manual' });
+            if (!_isRedirectStatus(response.status)) break;
+
+            const location = response.headers.get('location');
+            await _cancelResponseBody(response);
+            if (!location) {
+                throw new Error(`download failed: HTTP ${response.status} redirect missing Location`);
+            }
+            if (redirects === DOWNLOAD_MAX_REDIRECTS) {
+                throw new Error(`download failed: too many redirects (>${DOWNLOAD_MAX_REDIRECTS})`);
+            }
+            currentUrl = new URL(location, currentUrl);
+        }
 
         if (!response.ok) {
             throw new Error(`download failed: HTTP ${response.status}`);
@@ -244,6 +453,9 @@ async function _download(url) {
             throw new Error(`download timed out after ${DOWNLOAD_TIMEOUT_MS}ms`);
         }
         if (/^download (?:failed|exceeded)/.test(err?.message || '')) {
+            throw err;
+        }
+        if (/^remote attachment URL blocked by SSRF policy/.test(err?.message || '')) {
             throw err;
         }
         throw new Error(`download failed: ${err.message}`);
