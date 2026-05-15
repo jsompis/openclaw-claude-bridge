@@ -44,7 +44,12 @@ const MODE = process.env.OPENCLAW_BRIDGE_ATTACHMENT_MODE || 'passthrough';
 const PER_TURN_CAP = parseInt(process.env.OPENCLAW_BRIDGE_ATTACHMENT_PER_TURN_CAP) || 20;
 const SESSION_BUDGET_MB = parseInt(process.env.OPENCLAW_BRIDGE_ATTACHMENT_SESSION_BUDGET_MB) || 500;
 const DOWNLOAD_TIMEOUT_MS = parseInt(process.env.OPENCLAW_BRIDGE_ATTACHMENT_DOWNLOAD_TIMEOUT_MS) || 30000;
-const DOWNLOAD_MAX_BYTES = parseInt(process.env.OPENCLAW_BRIDGE_ATTACHMENT_DOWNLOAD_MAX_BYTES) || 50 * 1024 * 1024;
+const DEFAULT_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
+const ATTACHMENT_MAX_BYTES = _parsePositiveInt(
+    process.env.OPENCLAW_BRIDGE_ATTACHMENT_MAX_BYTES,
+    _parsePositiveInt(process.env.OPENCLAW_BRIDGE_ATTACHMENT_DOWNLOAD_MAX_BYTES, DEFAULT_ATTACHMENT_MAX_BYTES)
+);
+const DOWNLOAD_MAX_BYTES = _parsePositiveInt(process.env.OPENCLAW_BRIDGE_ATTACHMENT_DOWNLOAD_MAX_BYTES, ATTACHMENT_MAX_BYTES);
 const DOWNLOAD_MAX_REDIRECTS = 10;
 
 // State dir for staging attachment bytes. OC bridge has no formal state dir
@@ -62,6 +67,50 @@ class AttachmentBudgetError extends Error {
 
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']);
 const DOC_MIMES = new Set(['application/pdf']);  // CLI accepts PDF as "document"
+
+function _parsePositiveInt(value, fallback) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function _attachmentMaxBytesMessage(actual, max = ATTACHMENT_MAX_BYTES) {
+    return `attachment exceeded max bytes (${actual} > ${max})`;
+}
+
+function _assertAttachmentBytesWithinLimit(byteLength) {
+    if (byteLength > ATTACHMENT_MAX_BYTES) {
+        throw new Error(_attachmentMaxBytesMessage(byteLength));
+    }
+}
+
+function _base64DecodedLength(payload) {
+    const normalized = String(payload || '').replace(/\s/g, '');
+    if (!normalized) return 0;
+    const padding = normalized.endsWith('==') ? 2 : (normalized.endsWith('=') ? 1 : 0);
+    return Math.max(0, Math.floor((normalized.length * 3) / 4) - padding);
+}
+
+function _decodeBase64Attachment(payload) {
+    _assertAttachmentBytesWithinLimit(_base64DecodedLength(payload));
+    const bytes = Buffer.from(payload, 'base64');
+    _assertAttachmentBytesWithinLimit(bytes.byteLength);
+    return bytes;
+}
+
+function _readLocalAttachmentBytes(abs) {
+    const stat = fs.statSync(abs);
+    if (!stat.isFile()) return null;
+    _assertAttachmentBytesWithinLimit(stat.size);
+    const bytes = fs.readFileSync(abs);
+    _assertAttachmentBytesWithinLimit(bytes.byteLength);
+    return bytes;
+}
+
+function _enforceResolvedAttachmentLimit(resolved) {
+    if (!resolved) return null;
+    _assertAttachmentBytesWithinLimit(resolved.bytes?.byteLength || 0);
+    return resolved;
+}
 
 function _checkSessionBudget() {
     try {
@@ -124,9 +173,13 @@ function _parseDataUrl(url) {
     const mime = m[1] || 'application/octet-stream';
     const isBase64 = !!m[2];
     const payload = m[3];
-    const buf = isBase64
-        ? Buffer.from(payload, 'base64')
-        : Buffer.from(decodeURIComponent(payload), 'utf8');
+    if (isBase64) {
+        return { mime, buf: _decodeBase64Attachment(payload) };
+    }
+    const decoded = decodeURIComponent(payload);
+    _assertAttachmentBytesWithinLimit(Buffer.byteLength(decoded, 'utf8'));
+    const buf = Buffer.from(decoded, 'utf8');
+    _assertAttachmentBytesWithinLimit(buf.byteLength);
     return { mime, buf };
 }
 
@@ -474,8 +527,10 @@ function _resolveLocalOrDataUrl(url) {
         const abs = _resolveAllowedLocalPath(url);
         if (!abs) return null;
         if (!fs.existsSync(abs)) return null;
+        const bytes = _readLocalAttachmentBytes(abs);
+        if (bytes === null) return null;
         return {
-            bytes: fs.readFileSync(abs),
+            bytes,
             name: path.basename(abs),
             mime: _mimeFromExt(_safeExt(abs)),
         };
@@ -507,9 +562,9 @@ async function _resolveAttachment(part) {
 
         if (_isRemoteUrl(url)) {
             const { buf, mime } = await _download(url);
-            return _finalizeImageAttachment({ bytes: buf, mime, name: _nameFromUrl(url) });
+            return _enforceResolvedAttachmentLimit(_finalizeImageAttachment({ bytes: buf, mime, name: _nameFromUrl(url) }));
         }
-        return _finalizeImageAttachment(_resolveLocalOrDataUrl(url));
+        return _enforceResolvedAttachmentLimit(_finalizeImageAttachment(_resolveLocalOrDataUrl(url)));
     }
 
     if (part.type === 'file') {
@@ -518,7 +573,7 @@ async function _resolveAttachment(part) {
         let bytes = null;
         let mime = null;
         if (f.file_data) {
-            try { bytes = Buffer.from(f.file_data, 'base64'); } catch { return null; }
+            bytes = _decodeBase64Attachment(f.file_data);
         } else if (f.file_url) {
             if (_isRemoteUrl(f.file_url)) {
                 const downloaded = await _download(f.file_url);
@@ -536,14 +591,15 @@ async function _resolveAttachment(part) {
             const abs = _resolveAllowedLocalPath(f.path);
             if (!abs) return null;
             if (!fs.existsSync(abs)) return null;
-            bytes = fs.readFileSync(abs);
+            bytes = _readLocalAttachmentBytes(abs);
+            if (bytes === null) return null;
             if (!name) name = path.basename(abs);
         } else {
             return null;
         }
         const ext = _safeExt(name);
         mime = mime || _mimeFromExt(ext);
-        return { bytes, mime, name };
+        return _enforceResolvedAttachmentLimit({ bytes, mime, name });
     }
 
     return null;
@@ -557,7 +613,7 @@ function _resolveAttachmentSync(part) {
         if (_isRemoteUrl(url)) {
             throw new Error('remote downloads require async path');
         }
-        return _finalizeImageAttachment(_resolveLocalOrDataUrl(url));
+        return _enforceResolvedAttachmentLimit(_finalizeImageAttachment(_resolveLocalOrDataUrl(url)));
     }
 
     if (part.type === 'file') {
@@ -566,7 +622,7 @@ function _resolveAttachmentSync(part) {
         let bytes = null;
         let mime = null;
         if (f.file_data) {
-            try { bytes = Buffer.from(f.file_data, 'base64'); } catch { return null; }
+            bytes = _decodeBase64Attachment(f.file_data);
         } else if (f.file_url) {
             if (_isRemoteUrl(f.file_url)) {
                 throw new Error('remote downloads require async path');
@@ -580,14 +636,15 @@ function _resolveAttachmentSync(part) {
             const abs = _resolveAllowedLocalPath(f.path);
             if (!abs) return null;
             if (!fs.existsSync(abs)) return null;
-            bytes = fs.readFileSync(abs);
+            bytes = _readLocalAttachmentBytes(abs);
+            if (bytes === null) return null;
             if (!name) name = path.basename(abs);
         } else {
             return null;
         }
         const ext = _safeExt(name);
         mime = mime || _mimeFromExt(ext);
-        return { bytes, mime, name };
+        return _enforceResolvedAttachmentLimit({ bytes, mime, name });
     }
 
     return null;
@@ -758,5 +815,7 @@ module.exports = {
     classifyParts,
     classifyPartsAsync,
     AttachmentBudgetError,
+    ATTACHMENT_MAX_BYTES,
+    DOWNLOAD_MAX_BYTES,
     MODE,
 };

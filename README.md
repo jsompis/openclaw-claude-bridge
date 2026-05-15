@@ -177,6 +177,8 @@ At startup the bridge loads the repo-root `.env` file before importing modules t
 | `CLAUDE_BIN` | No | `claude` | Path to Claude Code CLI binary |
 | `MAX_PER_CHANNEL` | No | `2` | Max concurrent requests per channel |
 | `MAX_GLOBAL` | No | `20` | Max concurrent requests globally |
+| `OPENCLAW_BRIDGE_ATTACHMENT_MAX_BYTES` | No | `52428800` | Max decoded bytes per attachment across local files, data URLs/base64 payloads, inline text/code files, and remote downloads |
+| `OPENCLAW_BRIDGE_ATTACHMENT_DOWNLOAD_MAX_BYTES` | No | `OPENCLAW_BRIDGE_ATTACHMENT_MAX_BYTES` | Optional remote-only max download size; legacy value is reused for the unified max when the unified variable is unset |
 
 ### Ports
 
