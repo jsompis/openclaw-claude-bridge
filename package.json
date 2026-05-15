@@ -6,7 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node scripts/test-tool-parser.js && node scripts/test-bridge-tool-allowlist.js && node scripts/test-routing.js && node scripts/test-env-loader.js && node scripts/test-security.js && node scripts/test-attachment-allowlist.js && node scripts/test-attachment-async-download.js && node scripts/test-attachment-ssrf.js && node scripts/test-responsemap-key.js && node scripts/test-state-store-versioning.js && node scripts/test-prompt-cache-tool-resume.js && node scripts/test-claude-flags.js && node scripts/test-dashboard-proxy-config.js",
+    "test": "node scripts/test-tool-parser.js && node scripts/test-bridge-tool-allowlist.js && node scripts/test-routing.js && node scripts/test-env-loader.js && node scripts/test-security.js && node scripts/test-attachment-allowlist.js && node scripts/test-attachment-async-download.js && node scripts/test-attachment-ssrf.js && node scripts/test-responsemap-key.js && node scripts/test-state-store-versioning.js && node scripts/test-prompt-cache-tool-resume.js && node scripts/test-channel-serialization.js && node scripts/test-claude-flags.js && node scripts/test-dashboard-proxy-config.js",
     "test:tool-parser": "node scripts/test-tool-parser.js",
     "test:bridge-tool-allowlist": "node scripts/test-bridge-tool-allowlist.js",
     "test:routing": "node scripts/test-routing.js",
@@ -17,6 +17,7 @@
     "test:responsemap-key": "node scripts/test-responsemap-key.js",
     "test:state-store": "node scripts/test-state-store-versioning.js",
     "test:prompt-cache-tool-resume": "node scripts/test-prompt-cache-tool-resume.js",
+    "test:channel-serialization": "node scripts/test-channel-serialization.js",
     "test:claude-flags": "node scripts/test-claude-flags.js",
     "postinstall": "cd dashboard && npm install --ignore-scripts && npm run build"
   },

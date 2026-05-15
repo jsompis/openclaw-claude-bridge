@@ -6,7 +6,7 @@
 //   - channelMap: routing key → { sessionId, createdAt, routingSource, lastCompactionHash }
 //   - sessionMap: tool_call_id → { sessionId, createdAt }
 //   - responseMap: 200-char content prefix → { sessionId, createdAt }
-//   - channelActive: routing key → in-flight count (for per-channel concurrency limits)
+//   - channelActive: routing key → currently executing request count (dashboard/status)
 //   - requestLog / globalActivity: circular buffers for the dashboard
 //   - stats: aggregate counters surfaced to /status
 //
@@ -38,7 +38,6 @@ const RESPONSE_MAP_KEY_MAX_CHARS = 200;
 const RESPONSE_MAP_SENTINELS = new Set(['NO_REPLY', 'HEARTBEAT_OK', '[DONE]']);
 
 // Concurrency limits
-const MAX_PER_CHANNEL = parseInt(process.env.MAX_PER_CHANNEL) || 2;
 const MAX_GLOBAL = parseInt(process.env.MAX_GLOBAL) || 20;
 
 // --- In-memory state ---
@@ -239,7 +238,6 @@ module.exports = {
     MAX_LOG,
     MAX_ACTIVITY,
     MEMORY_GC_TTL_MS,
-    MAX_PER_CHANNEL,
     MAX_GLOBAL,
     stats,
     channelMap,

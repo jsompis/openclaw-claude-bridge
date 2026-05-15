@@ -27,7 +27,6 @@ const {
 } = require('./routing');
 
 const {
-    MAX_PER_CHANNEL,
     MAX_GLOBAL,
     stats,
     channelMap,
@@ -53,6 +52,34 @@ const {
 
 const { statusApp } = require('./dashboard-api');
 const { getContextWindow } = require('./claude');
+
+const channelQueues = new Map();
+
+async function runSerializedByRoutingKey(routingKey, requestId, task) {
+    if (!routingKey) return task();
+
+    const previous = channelQueues.get(routingKey) || Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const tail = previous.catch(() => {}).then(() => gate);
+    channelQueues.set(routingKey, tail);
+
+    const queuedAt = Date.now();
+    await previous.catch(() => {});
+    const waitMs = Date.now() - queuedAt;
+    if (waitMs > 0) {
+        console.log(`[${requestId}] channel queue acquired: "${routingKey}" after ${waitMs}ms`);
+    }
+
+    try {
+        return await task();
+    } finally {
+        release();
+        if (channelQueues.get(routingKey) === tail) {
+            channelQueues.delete(routingKey);
+        }
+    }
+}
 
 /**
  * OpenClaw sometimes asks the configured model for a short session filename slug.
@@ -211,24 +238,20 @@ app.post('/v1/chat/completions', async (req, res) => {
             console.log(`[${requestId}] OC channel: "${convLabel || ocSessionKey || inboundLabel || promptCacheKey || openAiUser}" source=${routingSource} agent: "${agentName || '(none)'}" routingKey: "${routingKey}"`);
         }
 
-        // --- Per-channel and global concurrent limits ---
+        // --- Global concurrent limit; same-channel work is serialized below ---
         if (stats.activeRequests > MAX_GLOBAL) {
             console.warn(`[${requestId}] BLOCKED: global limit (${MAX_GLOBAL} concurrent)`);
             logEntry.status = 'error';
             logEntry.error = 'Global concurrent limit';
             return res.status(429).json({ error: { message: `Too many concurrent requests (max ${MAX_GLOBAL})`, type: 'rate_limit' } });
         }
-        if (routingKey) {
-            const active = channelActive.get(routingKey) || 0;
-            if (active >= MAX_PER_CHANNEL) {
-                console.warn(`[${requestId}] BLOCKED: "${routingKey}" has ${active} in-flight (max ${MAX_PER_CHANNEL})`);
-                logEntry.status = 'error';
-                logEntry.error = 'Per-channel concurrent limit';
-                return res.status(429).json({ error: { message: `Too many concurrent requests for this channel (max ${MAX_PER_CHANNEL})`, type: 'rate_limit' } });
+
+        return await runSerializedByRoutingKey(routingKey, requestId, async () => {
+            if (routingKey) {
+                const active = channelActive.get(routingKey) || 0;
+                channelActive.set(routingKey, active + 1);
+                acquiredChannel = routingKey;
             }
-            channelActive.set(routingKey, active + 1);
-            acquiredChannel = routingKey;
-        }
 
         // 1) Check channelMap (primary: OC conversation → CLI session)
         if (!isResume && routingKey && channelMap.has(routingKey)) {
@@ -621,6 +644,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         console.log(`[${requestId}] done ${elapsed}ms chunks=${chunksSent}`);
         pushActivity(requestId, `✓ done ${(elapsed / 1000).toFixed(1)}s`);
 
+        });
     } catch (err) {
         stats.errors++;
         logEntry.status = 'error';
