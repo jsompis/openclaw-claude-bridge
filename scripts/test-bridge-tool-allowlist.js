@@ -114,6 +114,18 @@ async function main() {
         usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
       };
     }
+    if (promptText.includes('tool_use exec markup')) {
+      return {
+        text: '<tool_use>{"name":"exec","arguments":{"command":"echo via tool_use"}}</tool_use>',
+        usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
+      };
+    }
+    if (promptText.includes('function_calls exec markup')) {
+      return {
+        text: '<function_calls>[{"name":"exec","arguments":{"command":"echo via function_calls"}}]</function_calls>',
+        usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
+      };
+    }
     return {
       text: '<tool_call>{"name":"read","arguments":{"path":"README.md"}}</tool_call>',
       usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
@@ -178,6 +190,34 @@ async function main() {
       cwd: '/Users/sompisjunsui/.openclaw/workspace',
       yieldMs: 1000,
       timeout: 900,
+    });
+
+    const toolUseExec = await postJson(port, {
+      model: 'claude-opus-4-7',
+      stream: false,
+      tools: [functionTool('exec', 'run a command')],
+      messages: [{ role: 'user', content: 'please emit tool_use exec markup' }],
+    });
+    assert.strictEqual(toolUseExec.status, 200, toolUseExec.body);
+    assert.strictEqual(toolUseExec.json.choices[0].finish_reason, 'tool_calls');
+    assert.strictEqual(toolUseExec.json.choices[0].message.tool_calls.length, 1);
+    assert.strictEqual(toolUseExec.json.choices[0].message.tool_calls[0].function.name, 'exec');
+    assert.deepStrictEqual(JSON.parse(toolUseExec.json.choices[0].message.tool_calls[0].function.arguments), {
+      command: 'echo via tool_use',
+    });
+
+    const functionCallsExec = await postJson(port, {
+      model: 'claude-opus-4-7',
+      stream: false,
+      tools: [functionTool('exec', 'run a command')],
+      messages: [{ role: 'user', content: 'please emit function_calls exec markup' }],
+    });
+    assert.strictEqual(functionCallsExec.status, 200, functionCallsExec.body);
+    assert.strictEqual(functionCallsExec.json.choices[0].finish_reason, 'tool_calls');
+    assert.strictEqual(functionCallsExec.json.choices[0].message.tool_calls.length, 1);
+    assert.strictEqual(functionCallsExec.json.choices[0].message.tool_calls[0].function.name, 'exec');
+    assert.deepStrictEqual(JSON.parse(functionCallsExec.json.choices[0].message.tool_calls[0].function.arguments), {
+      command: 'echo via function_calls',
     });
   } finally {
     __setRunClaudeForTests(null);

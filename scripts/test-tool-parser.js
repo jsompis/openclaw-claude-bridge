@@ -16,6 +16,28 @@ const close = '</tool_call>';
 }
 
 {
+    const result = parseToolCallsDetailed('<tool_use>{"name":"exec","arguments":{"command":"echo tool_use"}}</tool_use>', { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 1, 'tool_use markup must parse as a structured tool call');
+    assert.strictEqual(result.repaired, false);
+    assert.strictEqual(result.calls[0].name, 'exec');
+    assert.deepStrictEqual(result.calls[0].arguments, { command: 'echo tool_use' });
+}
+
+{
+    const result = parseToolCallsDetailed('<function_calls>[{"name":"exec","arguments":{"command":"echo fn"}}]</function_calls>', { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 1, 'function_calls array markup must parse as structured tool calls');
+    assert.strictEqual(result.calls[0].name, 'exec');
+    assert.deepStrictEqual(result.calls[0].arguments, { command: 'echo fn' });
+}
+
+{
+    const result = parseToolCallsDetailed('<function_calls>{"name":"read","arguments":{"path":"README.md"}}</function_calls>', { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 1, 'function_calls object markup must parse as a structured tool call');
+    assert.strictEqual(result.calls[0].name, 'read');
+    assert.deepStrictEqual(result.calls[0].arguments, { path: 'README.md' });
+}
+
+{
     const result = parseToolCallsDetailed('<tool_call>{"name":"exec","arguments":{"command":"grep x file"}}</tool_char>', { allowedToolNames: allowed });
     assert.strictEqual(result.calls.length, 1);
     assert.strictEqual(result.repaired, true);
@@ -92,12 +114,24 @@ const close = '</tool_call>';
 }
 
 {
+    const cleaned = cleanResponseText('hello\n<tool_use>{"name":"exec","arguments":{"command":"echo nope"}}</tool_use>\nworld');
+    assert.strictEqual(cleaned, 'hello\n\nworld');
+}
+
+{
+    const cleaned = cleanResponseText('hello\n<function_calls>[{"name":"exec","arguments":{"command":"echo nope"}}]</function_calls>\nworld');
+    assert.strictEqual(cleaned, 'hello\n\nworld');
+}
+
+{
     const cleaned = cleanResponseText('hello\n<tool_call>{"name":"exec","arguments":{"command":"echo nope"}}');
     assert.strictEqual(cleaned, 'hello');
 }
 
 {
     assert.strictEqual(hasInternalBridgeMarkup('<tool_call>{"name":"exec"}'), true);
+    assert.strictEqual(hasInternalBridgeMarkup('<tool_use>{"name":"exec"}'), true);
+    assert.strictEqual(hasInternalBridgeMarkup('<function_calls>[]</function_calls>'), true);
     assert.strictEqual(hasInternalBridgeMarkup('plain text only'), false);
 }
 

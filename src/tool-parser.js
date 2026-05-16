@@ -168,7 +168,7 @@ function extractBalancedJsonObjects(text) {
 }
 
 function parseExactToolCalls(text, allowedToolNames) {
-    const regex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+    const regex = /<(tool_call|tool_use)\b[^>]*>\s*([\s\S]*?)\s*<\/\1>/g;
     const source = String(text || '');
     const searchable = stripCodeContexts(source);
     const calls = [];
@@ -176,9 +176,10 @@ function parseExactToolCalls(text, allowedToolNames) {
     let recoveredJson = false;
     let match;
     while ((match = regex.exec(searchable)) !== null) {
-        const openTag = '<tool_call>';
-        const closeTag = '</tool_call>';
-        const bodyStart = match.index + openTag.length;
+        const tagName = match[1];
+        const closeTag = `</${tagName}>`;
+        const openTagEnd = match[0].indexOf('>');
+        const bodyStart = match.index + openTagEnd + 1;
         const closeOffset = match[0].lastIndexOf(closeTag);
         const bodyEnd = match.index + closeOffset;
         const raw = source.slice(bodyStart, bodyEnd).trim();
@@ -193,10 +194,52 @@ function parseExactToolCalls(text, allowedToolNames) {
     return { calls, errors, recoveredJson };
 }
 
+function parseFunctionCallsMarkup(text, allowedToolNames) {
+    const regex = /<function_calls\b[^>]*>\s*([\s\S]*?)\s*<\/function_calls>/g;
+    const source = String(text || '');
+    const searchable = stripCodeContexts(source);
+    const calls = [];
+    const errors = [];
+    let recoveredJson = false;
+    let match;
+    while ((match = regex.exec(searchable)) !== null) {
+        const openTagEnd = match[0].indexOf('>');
+        const closeOffset = match[0].lastIndexOf('</function_calls>');
+        const bodyStart = match.index + openTagEnd + 1;
+        const bodyEnd = match.index + closeOffset;
+        const raw = source.slice(bodyStart, bodyEnd).trim();
+        let parsed;
+        try {
+            const parsedResult = parseLooseJson(raw);
+            parsed = parsedResult.parsed;
+            if (parsedResult.recovered) recoveredJson = true;
+        } catch {
+            errors.push({ error: 'json_parse_failed', preview: raw.slice(0, 300) });
+            continue;
+        }
+
+        const entries = Array.isArray(parsed) ? parsed : [parsed];
+        for (const entry of entries) {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+                errors.push({ error: 'invalid_payload', preview: JSON.stringify(entry).slice(0, 300) });
+                continue;
+            }
+            const result = coerceToolCall(JSON.stringify(entry), allowedToolNames);
+            if (result.call) {
+                calls.push(result.call);
+                if (result.recovered) recoveredJson = true;
+            } else {
+                errors.push(result);
+            }
+        }
+    }
+    return { calls, errors, recoveredJson };
+}
+
 function parseMalformedToolCall(text, allowedToolNames) {
     const source = String(text || '');
     const searchable = stripCodeContexts(source);
-    const opens = [...searchable.matchAll(/<tool_call\b[^>]*>/g)];
+    const opens = [...searchable.matchAll(/<(tool_call|tool_use)\b[^>]*>/g)];
     if (opens.length !== 1) {
         return { calls: [], repaired: false, reason: opens.length === 0 ? 'no_markup' : 'multiple_tool_call_blocks' };
     }
@@ -205,7 +248,7 @@ function parseMalformedToolCall(text, allowedToolNames) {
     const bodyStart = open.index + open[0].length;
     const tail = source.slice(bodyStart);
     const searchableTail = searchable.slice(bodyStart);
-    const closeCandidates = ['</tool_call>', '</tool_char>']
+    const closeCandidates = [`</${open[1]}>`, '</tool_call>', '</tool_use>', '</tool_char>']
         .map(tag => ({ tag, idx: searchableTail.indexOf(tag) }))
         .filter(c => c.idx !== -1)
         .sort((a, b) => a.idx - b.idx);
@@ -259,11 +302,15 @@ function parseBareToolCallJson(text, allowedToolNames) {
 function parseToolCallsDetailed(text, opts = {}) {
     const source = String(text || '');
     const allowedToolNames = opts.allowedToolNames || null;
-    const hadToolCallMarkup = /<tool_call\b/i.test(stripCodeContexts(source));
+    const hadToolCallMarkup = /<(?:tool_call|tool_use|function_calls)\b/i.test(stripCodeContexts(source));
 
     const exact = parseExactToolCalls(source, allowedToolNames);
     if (exact.calls.length > 0) {
         return { calls: exact.calls, repaired: false, hadToolCallMarkup, errors: exact.errors, recoveredJson: exact.recoveredJson };
+    }
+    const functionCalls = parseFunctionCallsMarkup(source, allowedToolNames);
+    if (functionCalls.calls.length > 0) {
+        return { calls: functionCalls.calls, repaired: false, hadToolCallMarkup, errors: exact.errors.concat(functionCalls.errors), recoveredJson: exact.recoveredJson || functionCalls.recoveredJson };
     }
 
     if (!hadToolCallMarkup) {
@@ -298,8 +345,8 @@ function parseToolCallsDetailed(text, opts = {}) {
         hadToolCallMarkup,
         malformedReason: malformed.reason,
         closeTag: malformed.closeTag,
-        errors: exact.errors.concat(malformed.error ? [malformed.error] : []),
-        recoveredJson: !!malformed.recoveredJson,
+        errors: exact.errors.concat(functionCalls.errors).concat(malformed.error ? [malformed.error] : []),
+        recoveredJson: !!(exact.recoveredJson || functionCalls.recoveredJson || malformed.recoveredJson),
     };
 }
 
@@ -309,7 +356,7 @@ function parseToolCalls(text, allowedToolNames) {
 
 function hasInternalBridgeMarkup(text) {
     if (!text) return false;
-    return /<(?:tool_call|tool_result|tool_thinking|previous_response)\b|<\/(?:tool_call|tool_char|tool_result|tool_thinking|previous_response)>/i.test(stripCodeContexts(String(text)));
+    return /<(?:tool_call|tool_use|function_calls|tool_result|tool_thinking|previous_response)\b|<\/(?:tool_call|tool_use|function_calls|tool_char|tool_result|tool_thinking|previous_response)>/i.test(stripCodeContexts(String(text)));
 }
 
 function redactSensitivePreview(text, maxLen = 400) {
@@ -326,15 +373,16 @@ function cleanResponseText(text) {
     if (!text) return text;
     const stripped = String(text)
         .replace(/<tool_thinking\b[^>]*>[\s\S]*?<\/tool_thinking>/g, '')
-        .replace(/<tool_call\b[^>]*>[\s\S]*?<\/(?:tool_call|tool_char)>/g, '')
-        .replace(/<tool_call\b[^>]*>[\s\S]*$/g, '')
+        .replace(/<(?:tool_call|tool_use)\b[^>]*>[\s\S]*?<\/(?:tool_call|tool_use|tool_char)>/g, '')
+        .replace(/<function_calls\b[^>]*>[\s\S]*?<\/function_calls>/g, '')
+        .replace(/<(?:tool_call|tool_use|function_calls)\b[^>]*>[\s\S]*$/g, '')
         .replace(/<tool_result\b[^>]*>[\s\S]*?<\/tool_result>/g, '')
         .replace(/<previous_response\b[^>]*>[\s\S]*?<\/previous_response>/g, '')
-        .replace(/<tool_result\b[^>]*>[\s\S]*?<\/tool_call>/g, '')
-        .replace(/<tool_call\b[^>]*>[\s\S]*?<\/tool_result>/g, '')
-        .replace(/<tool_thinking\b[^>]*>[\s\S]*?<\/tool_call>/g, '')
+        .replace(/<tool_result\b[^>]*>[\s\S]*?<\/(?:tool_call|tool_use)>/g, '')
+        .replace(/<(?:tool_call|tool_use)\b[^>]*>[\s\S]*?<\/tool_result>/g, '')
+        .replace(/<tool_thinking\b[^>]*>[\s\S]*?<\/(?:tool_call|tool_use)>/g, '')
         .replace(/<tool_thinking\b[^>]*>[\s\S]*?<\/tool_result>/g, '')
-        .replace(/<\/?(?:tool_thinking|tool_call|tool_result|previous_response)\b[^>]*>/g, '');
+        .replace(/<\/?(?:tool_thinking|tool_call|tool_use|function_calls|tool_result|previous_response)\b[^>]*>/g, '');
     const parts = stripped.split(/(```[\s\S]*?```)/);
     return parts
         .map((part, idx) => idx % 2 === 0 ? part.replace(/\n{3,}/g, '\n\n') : part)
