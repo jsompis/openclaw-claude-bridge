@@ -71,7 +71,7 @@ function loadEnvFile(envPath, env = process.env) {
 
 function loadDefaultEnv(env = process.env) {
     const envPath = env.OPENCLAW_BRIDGE_ENV_FILE
-        ? path.resolve(env.OPENCLAW_BRIDGE_ENV_FILE)
+        ? path.resolve(repoRoot(), env.OPENCLAW_BRIDGE_ENV_FILE)
         : path.join(repoRoot(), '.env');
     return loadEnvFile(envPath, env);
 }

@@ -192,7 +192,7 @@ I'll search for that information.
 </tool_call>
 ```
 
-The bridge parses these blocks (`parseToolCalls` in `server.js`) and converts them into OpenAI's `tool_calls` format:
+The bridge parses these blocks (`parseToolCalls` in `src/tool-parser.js`) and converts them into OpenAI's `tool_calls` format:
 
 ```json
 {

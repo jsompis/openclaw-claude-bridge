@@ -156,11 +156,11 @@ For detailed architecture of the dashboard, see [docs/architecture.md](docs/arch
 
 ### Environment Variables
 
-At startup the bridge loads the repo-root `.env` file before importing modules that read configuration. Values already present in the OS/service environment are not overwritten. The loader supports simple `KEY=VALUE` lines, blank lines, comments, and single/double quoted values; it does not print loaded secrets. Set `OPENCLAW_BRIDGE_ENV_FILE` only for tests or unusual deployments that need a different env-file path.
+At startup the bridge loads the repo-root `.env` file before importing modules that read configuration. Values already present in the OS/service environment are not overwritten. The loader supports simple `KEY=VALUE` lines, blank lines, comments, and single/double quoted values; it does not print loaded secrets. Set `OPENCLAW_BRIDGE_ENV_FILE` only for tests or unusual deployments that need a different env-file path; relative override paths resolve from the repo root.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `OPENCLAW_BRIDGE_ENV_FILE` | No | repo `.env` | Optional env-file path override for tests/unusual deployments |
+| `OPENCLAW_BRIDGE_ENV_FILE` | No | repo `.env` | Optional env-file path override for tests/unusual deployments; relative paths resolve from the repo root |
 | `DASHBOARD_PASS` | No | — | Dashboard password (Basic Auth, user: `admin`); also enables `/cleanup` |
 | `OPENCLAW_BRIDGE_STATUS_BIND` | No | `127.0.0.1` | Dashboard/status bind address; non-loopback requires `DASHBOARD_PASS` |
 | `OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS` | No | unset | Set to `1` to pass Claude CLI `--dangerously-skip-permissions` in trusted local sandbox/headless deployments that knowingly need it |
@@ -301,8 +301,14 @@ systemctl --user restart openclaw-claude-bridge
 ```
 openclaw-claude-bridge/
 ├── src/
-│   ├── index.js         Entry point, HTTP servers, graceful shutdown
-│   ├── server.js        Request handling, session management, state persistence
+│   ├── index.js         Entry point, early env load, HTTP servers, graceful shutdown
+│   ├── server.js        OpenAI-compatible request handling and route wiring
+│   ├── routing.js       Routing signal extraction and session key selection
+│   ├── state-store.js   Persisted bridge state, restore, and session maps
+│   ├── dashboard-api.js Status/dashboard API and /cleanup auth gating
+│   ├── session-cleanup.js CLI session pruning and startup cleanup
+│   ├── openai-response.js OpenAI/SSE response helpers
+│   ├── env-loader.js    Repo-root .env loader with optional override path
 │   ├── claude.js        CLI subprocess, stream parsing, thinking/effort mapping
 │   ├── tools.js         Dynamic tool protocol builder
 │   └── convert.js       OpenAI message format → Claude CLI text format

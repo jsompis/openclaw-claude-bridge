@@ -83,4 +83,37 @@ const node = process.execPath;
   assert.strictEqual(result.status, 0, `dashboard env loader child failed\nstdout=${result.stdout}\nstderr=${result.stderr}`);
 })();
 
+(function testRelativeOverrideResolvesFromRepoRoot() {
+  const tmpName = '.env.test-relative-loader';
+  const envPath = path.join(REPO, tmpName);
+  fs.writeFileSync(envPath, 'RELATIVE_ENV_OK=yes\n');
+
+  const script = `
+    const assert = require('assert');
+    const path = require('path');
+    delete process.env.RELATIVE_ENV_OK;
+    process.env.OPENCLAW_BRIDGE_ENV_FILE = ${JSON.stringify(tmpName)};
+    const { loadDefaultEnv } = require(${JSON.stringify(path.join(REPO, 'src', 'env-loader'))});
+    const result = loadDefaultEnv(process.env);
+    assert.strictEqual(result.loaded, true);
+    assert.strictEqual(process.env.RELATIVE_ENV_OK, 'yes');
+  `;
+
+  const result = spawnSync(node, ['-e', script], {
+    cwd: os.tmpdir(),
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      NODE_PATH: process.env.NODE_PATH || '',
+    },
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  try {
+    assert.strictEqual(result.status, 0, `relative env loader child failed\nstdout=${result.stdout}\nstderr=${result.stderr}`);
+  } finally {
+    fs.unlinkSync(envPath);
+  }
+})();
+
 console.log('env loader tests passed');
