@@ -668,11 +668,13 @@ app.post('/v1/chat/completions', async (req, res) => {
             if (rawMarkupPresent) {
                 const reason = toolCallResult.malformedReason || toolCallResult.errors?.[0]?.error || 'unparsed_internal_markup';
                 console.warn(`[${requestId}] WARNING suppressed_internal_bridge_markup reason=${reason} preview=${redactSensitivePreview(finalText || '')}`);
-                pushActivity(requestId, `⚠ blocked internal bridge markup (${reason})`);
-                logEntry.activity.push(`⚠ blocked internal bridge markup (${reason})`);
-                logEntry.status = 'blocked_internal_markup';
-                logEntry.error = reason;
-                cleanText = '[Bridge blocked invalid internal tool markup; no tool was executed.]';
+                pushActivity(requestId, `⚠ stripped internal bridge markup (${reason})`);
+                logEntry.activity.push(`⚠ stripped internal bridge markup (${reason})`);
+                if (!cleanText || !cleanText.trim()) {
+                    logEntry.status = 'blocked_internal_markup';
+                    logEntry.error = reason;
+                    cleanText = '[Bridge blocked invalid internal tool markup; no tool was executed.]';
+                }
             }
             if (cleanText) sendChunk(cleanText);
 

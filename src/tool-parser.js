@@ -51,6 +51,62 @@ function isAllowedToolName(name, allowedToolNames) {
     return allowedToolNames.has(name);
 }
 
+function stripCodeContexts(text) {
+    const source = String(text || '');
+    if (!source) return '';
+
+    const chars = source.split('');
+    const masked = new Array(source.length).fill(false);
+
+    function maskRange(start, end) {
+        const safeStart = Math.max(0, start);
+        const safeEnd = Math.min(source.length, end);
+        for (let i = safeStart; i < safeEnd; i += 1) {
+            chars[i] = /\s/.test(source[i]) ? source[i] : ' ';
+            masked[i] = true;
+        }
+    }
+
+    let i = 0;
+    while (i < source.length) {
+        if (source.startsWith('```', i)) {
+            const close = source.indexOf('```', i + 3);
+            const end = close === -1 ? source.length : close + 3;
+            maskRange(i, end);
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+
+    i = 0;
+    while (i < source.length) {
+        if (masked[i] || source[i] !== '`') {
+            i += 1;
+            continue;
+        }
+
+        let close = -1;
+        for (let j = i + 1; j < source.length; j += 1) {
+            if (masked[j] || source[j] === '\n' || source[j] === '\r') break;
+            if (source[j] === '`') {
+                close = j;
+                break;
+            }
+        }
+
+        if (close === -1) {
+            i += 1;
+            continue;
+        }
+
+        maskRange(i, close + 1);
+        i = close + 1;
+    }
+
+    return chars.join('');
+}
+
 function coerceToolCall(raw, allowedToolNames) {
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
@@ -113,12 +169,19 @@ function extractBalancedJsonObjects(text) {
 
 function parseExactToolCalls(text, allowedToolNames) {
     const regex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+    const source = String(text || '');
+    const searchable = stripCodeContexts(source);
     const calls = [];
     const errors = [];
     let recoveredJson = false;
     let match;
-    while ((match = regex.exec(text)) !== null) {
-        const raw = (match[1] || '').trim();
+    while ((match = regex.exec(searchable)) !== null) {
+        const openTag = '<tool_call>';
+        const closeTag = '</tool_call>';
+        const bodyStart = match.index + openTag.length;
+        const closeOffset = match[0].lastIndexOf(closeTag);
+        const bodyEnd = match.index + closeOffset;
+        const raw = source.slice(bodyStart, bodyEnd).trim();
         const result = coerceToolCall(raw, allowedToolNames);
         if (result.call) {
             calls.push(result.call);
@@ -131,16 +194,19 @@ function parseExactToolCalls(text, allowedToolNames) {
 }
 
 function parseMalformedToolCall(text, allowedToolNames) {
-    const opens = [...text.matchAll(/<tool_call\b[^>]*>/g)];
+    const source = String(text || '');
+    const searchable = stripCodeContexts(source);
+    const opens = [...searchable.matchAll(/<tool_call\b[^>]*>/g)];
     if (opens.length !== 1) {
         return { calls: [], repaired: false, reason: opens.length === 0 ? 'no_markup' : 'multiple_tool_call_blocks' };
     }
 
     const open = opens[0];
     const bodyStart = open.index + open[0].length;
-    const tail = text.slice(bodyStart);
+    const tail = source.slice(bodyStart);
+    const searchableTail = searchable.slice(bodyStart);
     const closeCandidates = ['</tool_call>', '</tool_char>']
-        .map(tag => ({ tag, idx: tail.indexOf(tag) }))
+        .map(tag => ({ tag, idx: searchableTail.indexOf(tag) }))
         .filter(c => c.idx !== -1)
         .sort((a, b) => a.idx - b.idx);
     const bodyEnd = closeCandidates.length > 0 ? closeCandidates[0].idx : tail.length;
@@ -160,7 +226,7 @@ function parseMalformedToolCall(text, allowedToolNames) {
 function parseToolCallsDetailed(text, opts = {}) {
     const source = String(text || '');
     const allowedToolNames = opts.allowedToolNames || null;
-    const hadToolCallMarkup = /<tool_call\b/i.test(source);
+    const hadToolCallMarkup = /<tool_call\b/i.test(stripCodeContexts(source));
 
     const exact = parseExactToolCalls(source, allowedToolNames);
     if (exact.calls.length > 0) {
@@ -189,7 +255,7 @@ function parseToolCalls(text, allowedToolNames) {
 
 function hasInternalBridgeMarkup(text) {
     if (!text) return false;
-    return /<(?:tool_call|tool_result|tool_thinking|previous_response)\b|<\/(?:tool_call|tool_char|tool_result|tool_thinking|previous_response)>/i.test(String(text));
+    return /<(?:tool_call|tool_result|tool_thinking|previous_response)\b|<\/(?:tool_call|tool_char|tool_result|tool_thinking|previous_response)>/i.test(stripCodeContexts(String(text)));
 }
 
 function redactSensitivePreview(text, maxLen = 400) {
@@ -229,4 +295,5 @@ module.exports = {
     parseToolCalls,
     parseToolCallsDetailed,
     redactSensitivePreview,
+    stripCodeContexts,
 };

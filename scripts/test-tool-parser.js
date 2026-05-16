@@ -1,9 +1,11 @@
 'use strict';
 
 const assert = require('assert');
-const { cleanResponseText, hasInternalBridgeMarkup, parseToolCallsDetailed, redactSensitivePreview } = require('../src/tool-parser');
+const { cleanResponseText, hasInternalBridgeMarkup, parseToolCallsDetailed, redactSensitivePreview, stripCodeContexts } = require('../src/tool-parser');
 
 const allowed = new Set(['exec', 'read']);
+const open = '<tool_call>';
+const close = '</tool_call>';
 
 {
     const result = parseToolCallsDetailed('<tool_call>{"name":"exec","arguments":{"command":"echo ok"}}</tool_call>', { allowedToolNames: allowed });
@@ -69,6 +71,72 @@ const allowed = new Set(['exec', 'read']);
 {
     assert.strictEqual(hasInternalBridgeMarkup('<tool_call>{"name":"exec"}'), true);
     assert.strictEqual(hasInternalBridgeMarkup('plain text only'), false);
+}
+
+{
+    const input = [
+        'Example only:',
+        '```json',
+        `${open}{"name":"exec","arguments":{"command":"echo fenced"}}${close}`,
+        '```',
+    ].join('\n');
+    const result = parseToolCallsDetailed(input, { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 0);
+    assert.strictEqual(result.hadToolCallMarkup, false);
+    assert.strictEqual(hasInternalBridgeMarkup(input), false);
+}
+
+{
+    const input = `Example only: \`${open}{"name":"exec","arguments":{"command":"echo inline"}}${close}\``;
+    const result = parseToolCallsDetailed(input, { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 0);
+    assert.strictEqual(result.hadToolCallMarkup, false);
+    assert.strictEqual(hasInternalBridgeMarkup(input), false);
+}
+
+{
+    const input = `${open}{"name":"read","arguments":{"path":"real.txt"}}${close}`;
+    const result = parseToolCallsDetailed(input, { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 1);
+    assert.strictEqual(result.calls[0].name, 'read');
+    assert.deepStrictEqual(result.calls[0].arguments, { path: 'real.txt' });
+}
+
+{
+    const input = [
+        'Run this:',
+        `${open}{"name":"exec","arguments":{"command":"echo real"}}${close}`,
+        '',
+        'Example only:',
+        '```',
+        `${open}{"name":"read","arguments":{"path":"example.txt"}}${close}`,
+        '```',
+    ].join('\n');
+    const result = parseToolCallsDetailed(input, { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 1);
+    assert.strictEqual(result.calls[0].name, 'exec');
+    assert.deepStrictEqual(result.calls[0].arguments, { command: 'echo real' });
+}
+
+{
+    const input = `${open}{"name":"exec","arguments":${close}`;
+    const result = parseToolCallsDetailed(input, { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 0);
+    assert.strictEqual(result.hadToolCallMarkup, true);
+    assert.ok(result.errors.length > 0 || result.malformedReason);
+}
+
+{
+    const inputs = [
+        `before \`${open}{"name":"exec","arguments":{}}${close}\` after`,
+        ['```js', '`inline-looking`', `${open}{"name":"exec","arguments":{}}${close}`, '```'].join('\n'),
+        ['```python', `${open}{"name":"exec","arguments":{}}`, 'unterminated'].join('\n'),
+    ];
+    for (const input of inputs) {
+        assert.strictEqual(stripCodeContexts(input).length, input.length);
+    }
+    const loneBacktick = `leave this lone \` ${open}{"name":"exec","arguments":{}}${close}`;
+    assert.strictEqual(stripCodeContexts(loneBacktick), loneBacktick);
 }
 
 {
