@@ -83,15 +83,15 @@ async function main() {
   assert.deepStrictEqual(Array.from(bridgeAllowedToolNames(tools)), ['gateway', 'sessions_send', 'sessions_spawn', 'read']);
 
   const instructions = buildToolInstructions(tools);
-  assert.ok(instructions.includes('**gateway**'), 'prompt instructions must reflect OpenClaw-provided gateway tool');
-  assert.ok(instructions.includes('**sessions_send**'), 'prompt instructions must reflect OpenClaw-provided sessions_send tool');
-  assert.ok(instructions.includes('**sessions_spawn**'), 'prompt instructions must reflect OpenClaw-provided sessions_spawn tool');
-  assert.ok(instructions.includes('**read**'), 'prompt instructions must retain safe tool');
-  assert.ok(instructions.includes('schema: {"type":"object","required":["path"]'), 'prompt instructions must include compact JSON schema');
-  assert.ok(instructions.includes('"path":{"type":"string","description":"Relative file path to read"}'), 'prompt instructions must include parameter fields');
+  assert.ok(instructions.includes('- gateway'), 'prompt instructions must reflect OpenClaw-provided gateway tool');
+  assert.ok(instructions.includes('- sessions_send'), 'prompt instructions must reflect OpenClaw-provided sessions_send tool');
+  assert.ok(instructions.includes('- sessions_spawn'), 'prompt instructions must reflect OpenClaw-provided sessions_spawn tool');
+  assert.ok(instructions.includes('- read'), 'prompt instructions must retain safe tool');
+  assert.ok(instructions.includes('args={"type":"object","required":["path"]'), 'prompt instructions must include compact JSON schema');
+  assert.ok(instructions.includes('"path":{"type":"string"}'), 'prompt instructions must include parameter fields');
   assert.ok(instructions.includes('"action"'), 'OpenClaw-provided tool schemas should be visible to Claude');
-  assert.strictEqual(compactToolSchema(safeTool), '{"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Relative file path to read"},"offset":{"type":"integer","minimum":1}}}');
-  assert.ok(buildToolInstructions([gatewayTool]).includes('**gateway**'), 'bridge must not impose a second hardcoded internal-tool policy');
+  assert.strictEqual(compactToolSchema(safeTool), '{"type":"object","required":["path"],"properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1}}}');
+  assert.ok(buildToolInstructions([gatewayTool]).includes('- gateway'), 'bridge must not impose a second hardcoded internal-tool policy');
 
   const calls = [];
   __setRunClaudeForTests(async (systemPrompt, promptText) => {
@@ -125,11 +125,11 @@ async function main() {
     });
     assert.strictEqual(gateway.status, 200, gateway.body);
     assert.strictEqual(calls.length, 1);
-    assert.ok(calls[0].systemPrompt.includes('**gateway**'), 'server prompt must reflect gateway tool when OpenClaw provides it');
-    assert.ok(calls[0].systemPrompt.includes('**sessions_send**'), 'server prompt must reflect sessions_send when OpenClaw provides it');
-    assert.ok(calls[0].systemPrompt.includes('**sessions_spawn**'), 'server prompt must reflect sessions_spawn when OpenClaw provides it');
-    assert.ok(calls[0].systemPrompt.includes('**read**'), 'server prompt must keep safe tool');
-    assert.ok(calls[0].systemPrompt.includes('schema: {"type":"object","required":["path"]'), 'server prompt must include safe tool schema');
+    assert.ok(calls[0].systemPrompt.includes('- gateway'), 'server prompt must reflect gateway tool when OpenClaw provides it');
+    assert.ok(calls[0].systemPrompt.includes('- sessions_send'), 'server prompt must reflect sessions_send when OpenClaw provides it');
+    assert.ok(calls[0].systemPrompt.includes('- sessions_spawn'), 'server prompt must reflect sessions_spawn when OpenClaw provides it');
+    assert.ok(calls[0].systemPrompt.includes('- read'), 'server prompt must keep safe tool');
+    assert.ok(calls[0].systemPrompt.includes('args={"type":"object","required":["path"]'), 'server prompt must include safe tool schema');
     assert.strictEqual(gateway.json.choices[0].finish_reason, 'tool_calls');
     assert.strictEqual(gateway.json.choices[0].message.tool_calls.length, 1);
     assert.strictEqual(gateway.json.choices[0].message.tool_calls[0].function.name, 'gateway');

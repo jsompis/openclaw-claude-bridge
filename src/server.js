@@ -6,7 +6,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 
 const { convertMessagesAsync, convertMessagesCompactAsync, extractNewMessagesAsync, extractNewUserMessagesAsync } = require('./convert');
-const { bridgeAllowedToolNames, buildToolInstructions } = require('./tools');
+const { bridgeAllowedToolNames, buildToolInstructions, stripUpstreamToolingSection } = require('./tools');
 const { runClaude } = require('./claude');
 const { cleanResponseText, hasInternalBridgeMarkup, parseToolCallsDetailed, redactSensitivePreview } = require('./tool-parser');
 
@@ -416,9 +416,10 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         // Always build system prompt (not persisted in CLI session)
         const { systemPrompt: devSystemPrompt } = await convertMessagesAsync(messages);
+        const strippedSystemPrompt = stripUpstreamToolingSection(devSystemPrompt);
         const toolInstructions = buildToolInstructions(tools);
-        combinedSystemPrompt = devSystemPrompt
-            ? `${devSystemPrompt}${toolInstructions}`
+        combinedSystemPrompt = strippedSystemPrompt
+            ? `${strippedSystemPrompt}${toolInstructions}`
             : toolInstructions || undefined;
 
         if (isResume) {
@@ -582,7 +583,8 @@ app.post('/v1/chat/completions', async (req, res) => {
                     const compactResult = await convertMessagesCompactAsync(messages);
                     promptText = compactResult.promptText;
                     if (compactResult.systemPrompt) {
-                        combinedSystemPrompt = `${compactResult.systemPrompt}${toolInstructions}`;
+                        const strippedCompactSystemPrompt = stripUpstreamToolingSection(compactResult.systemPrompt);
+                        combinedSystemPrompt = `${strippedCompactSystemPrompt}${toolInstructions}`;
                     }
                     attachmentBlocks = compactResult.attachmentBlocks || [];
                 }
