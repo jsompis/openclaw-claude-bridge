@@ -25,6 +25,31 @@ function createdSeconds() {
     return Math.floor(Date.now() / 1000);
 }
 
+function isWritable(res) {
+    return Boolean(res && !res.destroyed && !res.writableEnded && !res.writableFinished);
+}
+
+function safeWrite(res, payload) {
+    if (!isWritable(res)) return false;
+    try {
+        return res.write(payload);
+    } catch (err) {
+        if (err && (err.code === 'EPIPE' || err.code === 'ERR_STREAM_DESTROYED')) return false;
+        throw err;
+    }
+}
+
+function safeEnd(res) {
+    if (!isWritable(res)) return false;
+    try {
+        res.end();
+        return true;
+    } catch (err) {
+        if (err && (err.code === 'EPIPE' || err.code === 'ERR_STREAM_DESTROYED')) return false;
+        throw err;
+    }
+}
+
 function writeSseChunk(res, completionId, model, delta, finishReason = null) {
     const chunk = {
         id: completionId,
@@ -37,7 +62,7 @@ function writeSseChunk(res, completionId, model, delta, finishReason = null) {
             finish_reason: finishReason,
         }],
     };
-    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    return safeWrite(res, `data: ${JSON.stringify(chunk)}\n\n`);
 }
 
 function writeToolCallsStream(res, completionId, model, toolCalls, usagePayload) {
@@ -53,14 +78,14 @@ function writeToolCallsStream(res, completionId, model, toolCalls, usagePayload)
             })),
         }, finish_reason: null }],
     };
-    res.write(`data: ${JSON.stringify(tcDelta)}\n\n`);
+    if (!safeWrite(res, `data: ${JSON.stringify(tcDelta)}\n\n`)) return false;
 
     const stopChunk = {
         id: completionId, object: 'chat.completion.chunk',
         created: createdSeconds(), model,
         choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
     };
-    res.write(`data: ${JSON.stringify(stopChunk)}\n\n`);
+    if (!safeWrite(res, `data: ${JSON.stringify(stopChunk)}\n\n`)) return false;
 
     const usageChunk = {
         id: completionId, object: 'chat.completion.chunk',
@@ -68,9 +93,9 @@ function writeToolCallsStream(res, completionId, model, toolCalls, usagePayload)
         choices: [],
         usage: usagePayload,
     };
-    res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
-    res.write('data: [DONE]\n\n');
-    res.end();
+    if (!safeWrite(res, `data: ${JSON.stringify(usageChunk)}\n\n`)) return false;
+    if (!safeWrite(res, 'data: [DONE]\n\n')) return false;
+    return safeEnd(res);
 }
 
 function writeStopStream(res, completionId, model, usagePayload) {
@@ -79,7 +104,7 @@ function writeStopStream(res, completionId, model, usagePayload) {
         created: createdSeconds(), model,
         choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
     };
-    res.write(`data: ${JSON.stringify(stopChunk)}\n\n`);
+    if (!safeWrite(res, `data: ${JSON.stringify(stopChunk)}\n\n`)) return false;
 
     const usageChunk = {
         id: completionId, object: 'chat.completion.chunk',
@@ -87,9 +112,9 @@ function writeStopStream(res, completionId, model, usagePayload) {
         choices: [],
         usage: usagePayload,
     };
-    res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
-    res.write('data: [DONE]\n\n');
-    res.end();
+    if (!safeWrite(res, `data: ${JSON.stringify(usageChunk)}\n\n`)) return false;
+    if (!safeWrite(res, 'data: [DONE]\n\n')) return false;
+    return safeEnd(res);
 }
 
 function buildToolCallsNonStream(completionId, model, toolCalls, usagePayload) {
@@ -124,4 +149,7 @@ module.exports = {
     writeStopStream,
     buildToolCallsNonStream,
     buildTextNonStream,
+    isWritable,
+    safeWrite,
+    safeEnd,
 };

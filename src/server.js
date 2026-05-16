@@ -48,6 +48,8 @@ const {
     writeStopStream,
     buildToolCallsNonStream,
     buildTextNonStream,
+    safeWrite,
+    safeEnd,
 } = require('./openai-response');
 
 const { statusApp } = require('./dashboard-api');
@@ -505,11 +507,23 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         const completionId = `chatcmpl-${requestId}`;
         let chunksSent = 0;
+        let clientGone = false;
+        res.on('error', (err) => {
+            if (err && (err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === 'ERR_STREAM_DESTROYED')) {
+                clientGone = true;
+                console.warn(`[${requestId}] client stream closed while writing (${err.code})`);
+                return;
+            }
+            throw err;
+        });
 
         const sendChunk = (delta, finishReason = null) => {
-            if (isStream) {
-                writeSseChunk(res, completionId, model, delta, finishReason);
-                chunksSent++;
+            if (isStream && !clientGone) {
+                if (writeSseChunk(res, completionId, model, delta, finishReason) !== false) {
+                    chunksSent++;
+                } else {
+                    clientGone = true;
+                }
             }
         };
 
@@ -583,8 +597,8 @@ app.post('/v1/chat/completions', async (req, res) => {
                     if (isStream) {
                         sendChunk(`\n\n[Error: ${retryErr.message}]`);
                         sendChunk('', 'stop');
-                        res.write('data: [DONE]\n\n');
-                        res.end();
+                        safeWrite(res, 'data: [DONE]\n\n');
+                        safeEnd(res);
                     } else {
                         res.status(500).json({ error: { message: retryErr.message, type: 'internal_error' } });
                     }
@@ -597,8 +611,8 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (isStream) {
                     sendChunk(`\n\n[Error: ${errMessage}]`);
                     sendChunk('', 'stop');
-                    res.write('data: [DONE]\n\n');
-                    res.end();
+                    safeWrite(res, 'data: [DONE]\n\n');
+                    safeEnd(res);
                 } else {
                     res.status(500).json({ error: { message: errMessage, type: 'internal_error' } });
                 }
@@ -704,7 +718,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         logEntry.error = err.message;
         console.error(`[${requestId}] Unhandled:`, err);
         if (!res.headersSent) res.status(500).json({ error: { message: err.message, type: 'internal_error' } });
-        else res.end();
+        else safeEnd(res);
     } finally {
         stats.activeRequests = Math.max(0, stats.activeRequests - 1);
         if (acquiredChannel) {
