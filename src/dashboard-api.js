@@ -44,6 +44,78 @@ function requireDashboardAuth(req, res, next) {
     });
 }
 
+function firstHeader(value) {
+    if (Array.isArray(value)) return value[0];
+    return value;
+}
+
+function isLoopbackHost(hostname) {
+    const normalized = String(hostname || '').toLowerCase();
+    return normalized === 'localhost'
+        || normalized === '127.0.0.1'
+        || normalized === '::1'
+        || normalized === '[::1]'
+        || normalized.startsWith('127.');
+}
+
+function hostNameFromHeader(hostHeader) {
+    if (!hostHeader) return null;
+    try {
+        return new URL(`http://${hostHeader}`).hostname;
+    } catch {
+        return String(hostHeader).split(':')[0];
+    }
+}
+
+function originMatchesOrIsTrustedLocal(req, originHeader) {
+    if (!originHeader) return true;
+    if (originHeader === 'null') return false;
+
+    try {
+        const origin = new URL(originHeader);
+        const requestHost = firstHeader(req.headers.host);
+        const requestHostName = hostNameFromHeader(requestHost);
+
+        if (requestHost && origin.host === requestHost) return true;
+
+        // Preserve Vite/dev-proxy and local CLI/API usability: a loopback dashboard
+        // origin may proxy to another loopback host/port, but non-local browser
+        // origins must not drive destructive cleanup with ambient Basic Auth.
+        return isLoopbackHost(origin.hostname) && isLoopbackHost(requestHostName);
+    } catch {
+        return false;
+    }
+}
+
+function hasCleanupApiIntent(req) {
+    const csrfHeader = firstHeader(req.headers['x-openclaw-bridge-csrf']);
+    const requestedWith = firstHeader(req.headers['x-requested-with']);
+    return csrfHeader === 'cleanup' || requestedWith === 'OpenClawBridge';
+}
+
+function requireCleanupCsrf(req, res, next) {
+    const secFetchSite = String(firstHeader(req.headers['sec-fetch-site']) || '').toLowerCase();
+    const origin = firstHeader(req.headers.origin);
+
+    if (secFetchSite === 'cross-site' || !originMatchesOrIsTrustedLocal(req, origin)) {
+        res.status(403).json({
+            error: 'cleanup_csrf_rejected',
+            message: 'Cross-site cleanup requests are not allowed.',
+        });
+        return;
+    }
+
+    if (!hasCleanupApiIntent(req)) {
+        res.status(403).json({
+            error: 'cleanup_csrf_required',
+            message: 'POST /cleanup requires X-OpenClaw-Bridge-CSRF: cleanup or X-Requested-With: OpenClawBridge.',
+        });
+        return;
+    }
+
+    next();
+}
+
 // Serve React dashboard (built files)
 statusApp.use(express.static(path.join(__dirname, '../dashboard/dist')));
 
@@ -76,7 +148,7 @@ statusApp.get('/status', (req, res) => {
     });
 });
 
-statusApp.post('/cleanup', requireDashboardAuth, (req, res) => {
+statusApp.post('/cleanup', requireDashboardAuth, requireCleanupCsrf, (req, res) => {
     const result = cleanupSessions(); // default: delete sessions older than 24h
     console.log(`[openclaw-claude-bridge] Manual cleanup: deleted ${result.deleted}, remaining ${result.remaining}`);
     res.json(result);

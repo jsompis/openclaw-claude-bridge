@@ -144,7 +144,7 @@ The bridge includes a React dashboard accessible at `http://127.0.0.1:3458/` by 
 
 **Request table** — 13-column table showing every request: time, channel, session (color-coded), resume method (emoji badges: 🔧 Tools, 💬 Chat, 🆕 New, ♻️ Refresh, etc.), prompt size, model, thinking level, input/output tokens, cost, cache hit rate, duration, and status. Rows expand to show activity logs and errors. Supports channel and resume method filtering, and pagination.
 
-**Session cleanup** — one-click button to delete CLI sessions older than 24 hours. The `/cleanup` endpoint is disabled unless `DASHBOARD_PASS` is set, and requires Basic Auth when enabled.
+**Session cleanup** — one-click button to delete CLI sessions older than 24 hours. The `/cleanup` endpoint is disabled unless `DASHBOARD_PASS` is set, and requires Basic Auth plus an explicit API-intent header (`X-OpenClaw-Bridge-CSRF: cleanup` or `X-Requested-With: OpenClawBridge`) when enabled.
 
 **Password protection:** Set `DASHBOARD_PASS` in your environment to enable HTTP Basic Auth (user: `admin`). By default the dashboard binds to localhost only. Binding to a non-loopback/LAN interface requires `DASHBOARD_PASS` or the bridge refuses to start.
 
@@ -291,7 +291,7 @@ systemctl --user restart openclaw-claude-bridge
 | `GET` | `/v1/models` | 3456 | Available model list |
 | `GET` | `/health` | 3456 | Health check → `{"status":"ok"}` |
 | `GET` | `/status` | 3458 | Runtime stats JSON (uptime, requests, sessions, activity) |
-| `POST` | `/cleanup` | 3458 | Delete CLI sessions older than 24h; disabled unless `DASHBOARD_PASS` is set |
+| `POST` | `/cleanup` | 3458 | Delete CLI sessions older than 24h; disabled unless `DASHBOARD_PASS` is set; requires Basic Auth plus `X-OpenClaw-Bridge-CSRF: cleanup` or `X-Requested-With: OpenClawBridge` |
 | `GET` | `/` | 3458 | Dashboard (React SPA) |
 
 ---
@@ -326,7 +326,7 @@ openclaw-claude-bridge/
 
 - **Port 3456** binds to localhost only — not reachable from outside the machine
 - **Port 3458** binds to localhost (`127.0.0.1`) by default; non-loopback/LAN exposure requires `DASHBOARD_PASS`
-- **`/cleanup`** is disabled unless `DASHBOARD_PASS` is set, and is auth-gated when enabled
+- **`/cleanup`** is disabled unless `DASHBOARD_PASS` is set, and requires Basic Auth plus an explicit API-intent header when enabled
 - **`--tools ""`** disables all Claude native tools — no host command execution
 - **`--dangerously-skip-permissions`** is opt-in via `OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS=1` for trusted local sandbox/headless deployments that knowingly need it
 - **`.env`** contains secrets and is gitignored

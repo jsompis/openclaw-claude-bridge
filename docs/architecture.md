@@ -463,7 +463,7 @@ CLI session files are stored at:
 
 On macOS, `/tmp` is a symlink to `/private/tmp`, so the bridge uses `fs.realpathSync('/tmp')` to resolve the correct path.
 
-Sessions older than 24 hours are automatically deleted on startup. Manual dashboard cleanup via `POST /cleanup` is disabled unless `DASHBOARD_PASS` is set; when enabled, it requires Basic Auth.
+Sessions older than 24 hours are automatically deleted on startup. Manual dashboard cleanup via `POST /cleanup` is disabled unless `DASHBOARD_PASS` is set; when enabled, it requires Basic Auth plus an explicit API-intent header (`X-OpenClaw-Bridge-CSRF: cleanup` or `X-Requested-With: OpenClawBridge`).
 
 ---
 
@@ -630,7 +630,7 @@ Each row is expandable — clicking the triangle reveals the request's activity 
 
 ### Session Cleanup
 
-A "🧹 Clean Sessions" button in the Sessions section header triggers `POST /cleanup`, which deletes CLI session files older than 24 hours. The endpoint is disabled unless `DASHBOARD_PASS` is set, and requires Basic Auth when enabled. The dashboard refreshes automatically after cleanup.
+A "🧹 Clean Sessions" button in the Sessions section header triggers `POST /cleanup`, which deletes CLI session files older than 24 hours. The endpoint is disabled unless `DASHBOARD_PASS` is set, and requires Basic Auth plus an explicit API-intent header when enabled. The dashboard refreshes automatically after cleanup.
 
 ### Tech Stack
 
@@ -656,7 +656,7 @@ During Vite development, `/status` and `/cleanup` are proxied to `VITE_STATUS_AP
 
 - **Port 3456** (API): Bound to `127.0.0.1` — only accessible from the same machine. OpenClaw's gateway connects locally.
 - **Port 3458** (Dashboard/status): Bound to `127.0.0.1` by default. Set `OPENCLAW_BRIDGE_STATUS_BIND` to a non-loopback interface only when you want LAN exposure; the bridge refuses to start in that mode unless `DASHBOARD_PASS` is set.
-- **`/cleanup`**: Disabled unless `DASHBOARD_PASS` is set, and auth-gated when enabled.
+- **`/cleanup`**: Disabled unless `DASHBOARD_PASS` is set, and requires Basic Auth plus `X-OpenClaw-Bridge-CSRF: cleanup` or `X-Requested-With: OpenClawBridge` when enabled.
 
 ### Tool Isolation
 

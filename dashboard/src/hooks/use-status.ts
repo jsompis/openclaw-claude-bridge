@@ -172,7 +172,10 @@ export function useStatus() {
 
   const cleanup = useCallback(async () => {
     if (USE_MOCK) return
-    await fetch("/cleanup", { method: "POST" })
+    await fetch("/cleanup", {
+      method: "POST",
+      headers: { "X-OpenClaw-Bridge-CSRF": "cleanup" },
+    })
     refresh()
   }, [refresh])
 
