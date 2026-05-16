@@ -652,8 +652,13 @@ app.post('/v1/chat/completions', async (req, res) => {
             // Fail closed if raw bridge markup somehow survives parsing.
             let cleanText = cleanResponseText(finalText);
             if (rawMarkupPresent) {
-                console.warn(`[${requestId}] WARNING suppressed_internal_bridge_markup preview=${redactSensitivePreview(finalText || '')}`);
-                cleanText = '';
+                const reason = toolCallResult.malformedReason || toolCallResult.errors?.[0]?.error || 'unparsed_internal_markup';
+                console.warn(`[${requestId}] WARNING suppressed_internal_bridge_markup reason=${reason} preview=${redactSensitivePreview(finalText || '')}`);
+                pushActivity(requestId, `⚠ blocked internal bridge markup (${reason})`);
+                logEntry.activity.push(`⚠ blocked internal bridge markup (${reason})`);
+                logEntry.status = 'blocked_internal_markup';
+                logEntry.error = reason;
+                cleanText = '[Bridge blocked invalid internal tool markup; no tool was executed.]';
             }
             if (cleanText) sendChunk(cleanText);
 
@@ -686,7 +691,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             responseMap.set(rKey, { sessionId, createdAt: Date.now() });
         }
 
-        logEntry.status = 'ok';
+        if (logEntry.status === 'pending') logEntry.status = 'ok';
         const elapsed = Date.now() - startTime;
         logEntry.durationMs = elapsed;
         console.log(`[${requestId}] done ${elapsed}ms chunks=${chunksSent}`);

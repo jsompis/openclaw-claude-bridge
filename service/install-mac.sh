@@ -12,11 +12,42 @@ PLIST_PATH="$HOME/Library/LaunchAgents/${LABEL}.plist"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BRIDGE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+build_env_entries() {
+  local node_bin="$1"
+  local bridge_dir="$2"
+  local env_file="$3"
+  "$node_bin" - "$bridge_dir" "$env_file" <<'NODE'
+const path = require('path');
+const [bridgeDir, envFile] = process.argv.slice(2);
+const { loadEnvFile } = require(path.join(bridgeDir, 'src', 'env-loader'));
+
+function xmlEscape(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+const parsed = {};
+loadEnvFile(envFile, parsed);
+for (const [key, value] of Object.entries(parsed)) {
+  process.stdout.write(`        <key>${xmlEscape(key)}</key>\n        <string>${xmlEscape(value)}</string>\n`);
+}
+NODE
+}
+
 NODE_BIN="$(which node 2>/dev/null || true)"
 if [[ -z "$NODE_BIN" ]]; then
   echo "ERROR: node not found in PATH"
   echo "  Install Node.js: brew install node"
   exit 1
+fi
+
+if [[ "${OPENCLAW_BRIDGE_INSTALL_MAC_PRINT_ENV:-}" == "1" ]]; then
+  TEST_ENV_FILE="${OPENCLAW_BRIDGE_INSTALL_MAC_ENV_FILE:-$BRIDGE_DIR/.env}"
+  build_env_entries "$NODE_BIN" "$BRIDGE_DIR" "$TEST_ENV_FILE"
+  exit 0
 fi
 
 CLAUDE_BIN="$(which claude 2>/dev/null || true)"
@@ -48,7 +79,7 @@ fi
 
 # --- Check .env ---
 
-ENV_FILE="$BRIDGE_DIR/.env"
+ENV_FILE="${OPENCLAW_BRIDGE_INSTALL_MAC_ENV_FILE:-$BRIDGE_DIR/.env}"
 if [[ ! -f "$ENV_FILE" ]]; then
   echo ""
   echo "ERROR: .env not found at $ENV_FILE"
@@ -67,34 +98,13 @@ for dir in "$NODE_DIR" "$CLAUDE_DIR" "$HOME/.local/bin" "/opt/homebrew/bin"; do
 done
 
 # --- Read .env into plist EnvironmentVariables ---
+# Keep parsing equivalent to src/env-loader.js for simple KEY=VALUE / export /
+# quoted values / safe inline comments, without eval'ing the .env as shell.
 
-xml_escape() {
-  local s="$1"
-  s="${s//&/&amp;}"
-  s="${s//</&lt;}"
-  s="${s//>/&gt;}"
-  s="${s//\"/&quot;}"
-  echo "$s"
-}
-
-ENV_ENTRIES=""
-while IFS= read -r line; do
-  # Skip comments and empty lines
-  [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-  # Extract key=value
-  key="${line%%=*}"
-  value="${line#*=}"
-  # Skip if key is empty or line has no =
-  [[ -z "$key" || "$key" == "$line" ]] && continue
-  # Strip surrounding quotes from value
-  value="${value#\"}" ; value="${value%\"}"
-  value="${value#\'}" ; value="${value%\'}"
-  # XML-escape the value
-  value="$(xml_escape "$value")"
-  ENV_ENTRIES+="        <key>${key}</key>
-        <string>${value}</string>
-"
-done < "$ENV_FILE"
+ENV_ENTRIES="$(build_env_entries "$NODE_BIN" "$BRIDGE_DIR" "$ENV_FILE")"
+if [[ -n "$ENV_ENTRIES" ]]; then
+  ENV_ENTRIES+=$'\n'
+fi
 
 # --- Generate plist ---
 

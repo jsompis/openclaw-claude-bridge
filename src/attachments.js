@@ -459,6 +459,15 @@ async function _download(url) {
         for (let redirects = 0; redirects <= DOWNLOAD_MAX_REDIRECTS; redirects++) {
             await _validateRemoteUrlForDownload(currentUrl);
             response = await fetch(currentUrl, { signal: controller.signal, redirect: 'manual' });
+            try {
+                // Re-check before consuming any body. Node fetch does not expose the
+                // socket IP without a custom dispatcher, so this is a practical DNS
+                // revalidation guard in addition to per-redirect validation.
+                await _validateRemoteUrlForDownload(new URL(response.url || currentUrl));
+            } catch (err) {
+                await _cancelResponseBody(response);
+                throw err;
+            }
             if (!_isRedirectStatus(response.status)) break;
 
             const location = response.headers.get('location');

@@ -22,6 +22,57 @@ function bridgeAllowedToolNames(tools) {
     return new Set(filterBridgeAllowedTools(tools).map(toolName).filter(Boolean));
 }
 
+function truncateDescription(value, max = 180) {
+    if (typeof value !== 'string') return undefined;
+    const compact = value.replace(/\s+/g, ' ').trim();
+    if (!compact) return undefined;
+    return compact.length > max ? compact.slice(0, max - 1) + '…' : compact;
+}
+
+function compactSchemaValue(value, depth = 0) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || depth > 5) return undefined;
+
+    const out = {};
+    for (const key of ['type', 'format', 'pattern', 'minimum', 'maximum', 'minLength', 'maxLength', 'default']) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) out[key] = value[key];
+    }
+    if (value.description) out.description = truncateDescription(value.description);
+    if (Array.isArray(value.enum) && value.enum.length <= 20) out.enum = value.enum;
+    if (Array.isArray(value.required) && value.required.length > 0) out.required = value.required;
+
+    if (value.properties && typeof value.properties === 'object' && !Array.isArray(value.properties)) {
+        out.properties = {};
+        for (const [propName, propSchema] of Object.entries(value.properties)) {
+            const compactProp = compactSchemaValue(propSchema, depth + 1);
+            out.properties[propName] = compactProp || {};
+        }
+    }
+
+    if (value.items) {
+        const compactItems = compactSchemaValue(value.items, depth + 1);
+        if (compactItems) out.items = compactItems;
+    }
+
+    for (const unionKey of ['anyOf', 'oneOf', 'allOf']) {
+        if (Array.isArray(value[unionKey])) {
+            const compactUnion = value[unionKey]
+                .map(item => compactSchemaValue(item, depth + 1))
+                .filter(Boolean);
+            if (compactUnion.length > 0) out[unionKey] = compactUnion;
+        }
+    }
+
+    return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function compactToolSchema(tool, maxLen = 1800) {
+    const schema = tool?.function?.parameters || tool?.parameters;
+    const compact = compactSchemaValue(schema);
+    if (!compact) return '';
+    const json = JSON.stringify(compact);
+    return json.length > maxLen ? json.slice(0, maxLen - 1) + '…' : json;
+}
+
 /**
  * Build tool instructions for the system prompt.
  *
@@ -67,7 +118,8 @@ function buildToolInstructions(tools) {
     for (const tool of allowedTools) {
         const name = toolName(tool);
         const desc = tool.function?.description || tool.description || '';
-        lines.push(`- **${name}**: ${desc}`);
+        const schema = compactToolSchema(tool);
+        lines.push(`- **${name}**: ${desc}${schema ? `\n  schema: ${schema}` : ''}`);
     }
 
     return lines.join('\n');
@@ -76,6 +128,7 @@ function buildToolInstructions(tools) {
 module.exports = {
     bridgeAllowedToolNames,
     buildToolInstructions,
+    compactToolSchema,
     filterBridgeAllowedTools,
     isBridgeAllowedToolName,
 };

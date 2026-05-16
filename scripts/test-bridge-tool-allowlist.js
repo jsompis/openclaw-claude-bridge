@@ -4,7 +4,7 @@ const assert = require('assert');
 const http = require('http');
 const path = require('path');
 
-const { buildToolInstructions, bridgeAllowedToolNames, filterBridgeAllowedTools, isBridgeAllowedToolName } = require('../src/tools');
+const { buildToolInstructions, bridgeAllowedToolNames, compactToolSchema, filterBridgeAllowedTools, isBridgeAllowedToolName } = require('../src/tools');
 
 delete process.env.DASHBOARD_PASS;
 process.env.OPENCLAW_BRIDGE_ENV_FILE = path.join(__dirname, '..', '.env.test-missing');
@@ -46,25 +46,38 @@ function postJson(port, body) {
   });
 }
 
-function functionTool(name, description) {
+function functionTool(name, description, parameters = { type: 'object', properties: {} }) {
   return {
     type: 'function',
     function: {
       name,
       description,
-      parameters: { type: 'object', properties: {} },
+      parameters,
     },
   };
 }
 
 async function main() {
-  const gatewayTool = functionTool('gateway', 'internal gateway control');
+  const gatewayTool = functionTool('gateway', 'internal gateway control', {
+    type: 'object',
+    required: ['action'],
+    properties: { action: { type: 'string', enum: ['restart'] } },
+  });
   const sessionsSendTool = functionTool('sessions_send', 'internal session send');
-  const safeTool = functionTool('read', 'read a file');
-  const tools = [gatewayTool, sessionsSendTool, safeTool];
+  const sessionsSpawnTool = functionTool('sessions_spawn', 'internal session spawn');
+  const safeTool = functionTool('read', 'read a file', {
+    type: 'object',
+    required: ['path'],
+    properties: {
+      path: { type: 'string', description: 'Relative file path to read' },
+      offset: { type: 'integer', minimum: 1 },
+    },
+  });
+  const tools = [gatewayTool, sessionsSendTool, sessionsSpawnTool, safeTool];
 
   assert.strictEqual(isBridgeAllowedToolName('gateway'), false);
   assert.strictEqual(isBridgeAllowedToolName('sessions_send'), false);
+  assert.strictEqual(isBridgeAllowedToolName('sessions_spawn'), false);
   assert.strictEqual(isBridgeAllowedToolName('read'), true);
   assert.deepStrictEqual(filterBridgeAllowedTools(tools).map(t => t.function.name), ['read']);
   assert.deepStrictEqual(Array.from(bridgeAllowedToolNames(tools)), ['read']);
@@ -72,7 +85,12 @@ async function main() {
   const instructions = buildToolInstructions(tools);
   assert.ok(!instructions.includes('gateway'), 'prompt instructions must hide gateway');
   assert.ok(!instructions.includes('sessions_send'), 'prompt instructions must hide sessions_send');
+  assert.ok(!instructions.includes('sessions_spawn'), 'prompt instructions must hide sessions_spawn');
   assert.ok(instructions.includes('**read**'), 'prompt instructions must retain safe tool');
+  assert.ok(instructions.includes('schema: {"type":"object","required":["path"]'), 'prompt instructions must include compact JSON schema');
+  assert.ok(instructions.includes('"path":{"type":"string","description":"Relative file path to read"}'), 'prompt instructions must include parameter fields');
+  assert.ok(!instructions.includes('"action"'), 'blocked tool schemas must not leak into prompt instructions');
+  assert.strictEqual(compactToolSchema(safeTool), '{"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Relative file path to read"},"offset":{"type":"integer","minimum":1}}}');
   assert.strictEqual(buildToolInstructions([gatewayTool]), '', 'blocked-only tools should produce no tool instructions');
 
   const calls = [];
@@ -81,6 +99,12 @@ async function main() {
     if (promptText.includes('blocked tool')) {
       return {
         text: '<tool_call>{"name":"gateway","arguments":{"action":"restart"}}</tool_call>',
+        usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
+      };
+    }
+    if (promptText.includes('malformed blocked markup')) {
+      return {
+        text: 'thinking <tool_call>{"name":"sessions_spawn","arguments":{"prompt":"secret"}}',
         usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
       };
     }
@@ -103,10 +127,23 @@ async function main() {
     assert.strictEqual(calls.length, 1);
     assert.ok(!calls[0].systemPrompt.includes('gateway'), 'server prompt must hide gateway');
     assert.ok(!calls[0].systemPrompt.includes('sessions_send'), 'server prompt must hide sessions_send');
+    assert.ok(!calls[0].systemPrompt.includes('sessions_spawn'), 'server prompt must hide sessions_spawn');
     assert.ok(calls[0].systemPrompt.includes('**read**'), 'server prompt must keep safe tool');
+    assert.ok(calls[0].systemPrompt.includes('schema: {"type":"object","required":["path"]'), 'server prompt must include safe tool schema');
     assert.ok(!blocked.json.choices[0].message.tool_calls, 'blocked gateway call must not be executable');
-    assert.strictEqual(blocked.json.choices[0].message.content, '');
+    assert.strictEqual(blocked.json.choices[0].message.content, '[Bridge blocked invalid internal tool markup; no tool was executed.]');
     assert.strictEqual(blocked.json.choices[0].finish_reason, 'stop');
+
+    const malformedBlocked = await postJson(port, {
+      model: 'claude-opus-4-7',
+      stream: false,
+      tools,
+      messages: [{ role: 'user', content: 'please emit malformed blocked markup' }],
+    });
+    assert.strictEqual(malformedBlocked.status, 200, malformedBlocked.body);
+    assert.ok(!malformedBlocked.json.choices[0].message.tool_calls, 'malformed sessions_spawn call must not be executable');
+    assert.strictEqual(malformedBlocked.json.choices[0].message.content, '[Bridge blocked invalid internal tool markup; no tool was executed.]');
+    assert.strictEqual(malformedBlocked.json.choices[0].finish_reason, 'stop');
 
     const safe = await postJson(port, {
       model: 'claude-opus-4-7',
@@ -115,7 +152,7 @@ async function main() {
       messages: [{ role: 'user', content: 'please emit safe tool' }],
     });
     assert.strictEqual(safe.status, 200, safe.body);
-    assert.strictEqual(calls.length, 2);
+    assert.strictEqual(calls.length, 3);
     assert.strictEqual(safe.json.choices[0].finish_reason, 'tool_calls');
     assert.strictEqual(safe.json.choices[0].message.tool_calls.length, 1);
     assert.strictEqual(safe.json.choices[0].message.tool_calls[0].function.name, 'read');

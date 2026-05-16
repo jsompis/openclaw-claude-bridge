@@ -6,6 +6,7 @@ const {
   buildClaudeArgs,
   buildClaudeLiveArgs,
   getClaudeLiveIdleMs,
+  getContextWindow,
   shouldSkipClaudePermissions,
   shouldUseClaudeLive,
 } = require('../src/claude');
@@ -30,6 +31,25 @@ assert.strictEqual(hasDangerousFlag(argsFor({})), false, 'default args should no
 assert.strictEqual(shouldUseClaudeLive({}), false, 'live mode should default off');
 assert.strictEqual(getClaudeLiveIdleMs({}), DEFAULT_CLAUDE_LIVE_IDLE_MS, 'live idle should default to 10 minutes');
 assert.strictEqual(DEFAULT_CLAUDE_LIVE_IDLE_MS, 600000, 'live idle default should be 600000 ms');
+
+{
+  const previousOpus47 = process.env.OPUS_47_MODEL;
+  const previousSonnet = process.env.SONNET_MODEL;
+  try {
+    delete process.env.OPUS_47_MODEL;
+    delete process.env.SONNET_MODEL;
+    assert.strictEqual(getContextWindow('claude-opus-4-7'), 200000, 'default resolved model should use 200K context');
+    process.env.OPUS_47_MODEL = 'claude-opus-4-7[1m]';
+    process.env.SONNET_MODEL = 'claude-sonnet-4-6[1m]';
+    assert.strictEqual(getContextWindow('claude-opus-4-7'), 1000000, '[1m] model override should use 1M context');
+    assert.strictEqual(getContextWindow('claude-sonnet-4-6'), 1000000, '[1m] sonnet override should use 1M context');
+  } finally {
+    if (previousOpus47 === undefined) delete process.env.OPUS_47_MODEL;
+    else process.env.OPUS_47_MODEL = previousOpus47;
+    if (previousSonnet === undefined) delete process.env.SONNET_MODEL;
+    else process.env.SONNET_MODEL = previousSonnet;
+  }
+}
 
 for (const value of ['1', 'true', 'TRUE', 'yes', 'on', ' On ']) {
   const env = { OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS: value };

@@ -39,7 +39,14 @@ const allowed = new Set(['exec', 'read']);
 {
     const result = parseToolCallsDetailed('<tool_call>{"name":"gateway","arguments":{}}</tool_call>', { allowedToolNames: new Set() });
     assert.strictEqual(result.calls.length, 0);
+    assert.strictEqual(result.hadToolCallMarkup, true);
     assert.strictEqual(result.errors[0].error, 'tool_not_allowed');
+}
+
+{
+    const result = parseToolCallsDetailed('<tool_call>{"name":"read","arguments":{"path":"README.md"}}</tool_call>', { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 1, 'valid allowed markup must parse as a tool call, not suppressed text');
+    assert.strictEqual(result.errors.length, 0);
 }
 
 {

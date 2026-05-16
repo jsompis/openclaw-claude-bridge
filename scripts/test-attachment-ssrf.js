@@ -100,6 +100,34 @@ async function assertSkippedBySsrf(classifyPartsAsync, url, message) {
   });
   assert.strictEqual(fetchCalled, false, 'fetch must not run when DNS resolves to a blocked address');
 
+  let rebindLookups = 0;
+  let rebindFetchCalls = 0;
+  await withMockedNetwork({
+    lookup: async hostname => {
+      assert.strictEqual(hostname, 'rebind.example.test');
+      rebindLookups += 1;
+      return [{ address: rebindLookups === 1 ? '93.184.216.34' : '10.9.8.7', family: 4 }];
+    },
+    fetchImpl: async (input, options) => {
+      rebindFetchCalls += 1;
+      assert.strictEqual(String(input), 'https://rebind.example.test/image.png');
+      assert.strictEqual(options.redirect, 'manual', 'download fetch must not auto-follow redirects');
+      return new Response('unsafe', {
+        status: 200,
+        headers: { 'content-type': 'image/png' },
+      });
+    },
+  }, async () => {
+    const { result, warnings } = await withWarnsCaptured(() => classifyPartsAsync([
+      { type: 'image_url', image_url: { url: 'https://rebind.example.test/image.png' } },
+    ], 'ssrf-rebind'));
+    assert.deepStrictEqual(result.attachments, [], 'post-fetch DNS revalidation should skip rebinding hostname before body consumption');
+    assert.ok(result.text.includes('resolved to blocked address 10.9.8.7'), `expected rebind block text, got: ${result.text}`);
+    assert.ok(warnings.some(w => w.includes('resolved to blocked address 10.9.8.7')), `expected rebind block warning, got: ${warnings.join('\n')}`);
+  });
+  assert.strictEqual(rebindFetchCalls, 1, 'rebind test should fetch once before post-fetch revalidation blocks consumption');
+  assert.strictEqual(rebindLookups, 2, 'hostname should be checked before fetch and before body consumption');
+
   let fetchCalls = 0;
   await withMockedNetwork({
     lookup: async hostname => {

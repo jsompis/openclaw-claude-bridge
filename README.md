@@ -165,9 +165,9 @@ At startup the bridge loads the repo-root `.env` file before importing modules t
 | `OPENCLAW_BRIDGE_STATUS_BIND` | No | `127.0.0.1` | Dashboard/status bind address; non-loopback requires `DASHBOARD_PASS` |
 | `OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS` | No | unset | Set to `1` to pass Claude CLI `--dangerously-skip-permissions` in trusted local sandbox/headless deployments that knowingly need it |
 | `VITE_STATUS_API_TARGET` | No | `http://127.0.0.1:3458` | Dashboard Vite dev proxy target for `/status` and `/cleanup` |
-| `OPUS_MODEL` | No | `claude-opus-4-6` | Claude CLI model override for `claude-opus-4-6` |
-| `OPUS_47_MODEL` | No | `claude-opus-4-7` | Claude CLI model override for `claude-opus-4-7` |
-| `SONNET_MODEL` | No | `claude-sonnet-4-6` | Claude CLI model override for `claude-sonnet-4-6` |
+| `OPUS_MODEL` | No | `claude-opus-4-6` | Claude CLI model override for `claude-opus-4-6`; append `[1m]` only when your Claude CLI exposes that 1M variant |
+| `OPUS_47_MODEL` | No | `claude-opus-4-7` | Claude CLI model override for `claude-opus-4-7`; append `[1m]` only when your Claude CLI exposes that 1M variant |
+| `SONNET_MODEL` | No | `claude-sonnet-4-6` | Claude CLI model override for `claude-sonnet-4-6`; append `[1m]` only when your Claude CLI exposes that 1M variant |
 | `HAIKU_MODEL` | No | `claude-haiku-4-5` | Claude CLI model override for `claude-haiku-4-5` |
 | `IDLE_TIMEOUT_MS` | No | `120000` | Kill an active CLI request after this many ms of no stdout activity |
 | `HARD_TIMEOUT_MS` | No | `1200000` | Absolute max runtime for an active CLI request, including live-mode turns |
@@ -177,8 +177,14 @@ At startup the bridge loads the repo-root `.env` file before importing modules t
 | `OPENCLAW_BRIDGE_STATUS_PORT` | No | `3458` | Dashboard port |
 | `CLAUDE_BIN` | No | `claude` | Path to Claude Code CLI binary |
 | `MAX_GLOBAL` | No | `20` | Max concurrent requests globally; same routed channel/session requests are serialized one-at-a-time |
+| `OPENCLAW_BRIDGE_ATTACHMENT_MODE` | No | `passthrough` | Native multimodal attachment mode; set `describe` to drop non-text parts and rely on upstream descriptions |
+| `OPENCLAW_BRIDGE_ATTACHMENT_PER_TURN_CAP` | No | `20` | Max non-text attachment parts accepted per turn |
+| `OPENCLAW_BRIDGE_ATTACHMENT_SESSION_BUDGET_MB` | No | `500` | Attachment staging/state disk budget in MiB |
 | `OPENCLAW_BRIDGE_ATTACHMENT_MAX_BYTES` | No | `52428800` | Max decoded bytes per attachment across local files, data URLs/base64 payloads, inline text/code files, and remote downloads |
+| `OPENCLAW_BRIDGE_ATTACHMENT_DOWNLOAD_TIMEOUT_MS` | No | `30000` | Remote HTTP(S) attachment download timeout in ms |
 | `OPENCLAW_BRIDGE_ATTACHMENT_DOWNLOAD_MAX_BYTES` | No | `OPENCLAW_BRIDGE_ATTACHMENT_MAX_BYTES` | Optional remote-only max download size; legacy value is reused for the unified max when the unified variable is unset |
+| `OPENCLAW_BRIDGE_STATE_DIR` | No | `./state` | Directory for persisted state and staged attachments |
+| `OPENCLAW_BRIDGE_ATTACHMENT_ROOTS` | No | unset | Colon-separated allowlist of local file roots for local path attachments; `~` is supported |
 
 ### Ports
 
@@ -205,21 +211,21 @@ Add this provider to your OpenClaw config (`~/.openclaw/openclaw.json`):
           {
             "id": "claude-opus-4-7",
             "name": "Claude Opus 4.7",
-            "contextWindow": 1000000,
+            "contextWindow": 200000,
             "maxTokens": 128000,
             "reasoning": true
           },
           {
             "id": "claude-opus-4-6",
             "name": "Claude Opus 4.6",
-            "contextWindow": 1000000,
+            "contextWindow": 200000,
             "maxTokens": 128000,
             "reasoning": true
           },
           {
             "id": "claude-sonnet-4-6",
             "name": "Claude Sonnet 4.6",
-            "contextWindow": 1000000,
+            "contextWindow": 200000,
             "maxTokens": 64000,
             "reasoning": true
           },
@@ -238,6 +244,8 @@ Add this provider to your OpenClaw config (`~/.openclaw/openclaw.json`):
 ```
 
 Then assign the model to your agent. The `apiKey` can be any non-empty string — the bridge doesn't check it.
+
+The bridge and dashboard report a 200K context window by default. If your Claude CLI exposes a 1M model variant, set the relevant model override to a name containing `[1m]` (for example `OPUS_47_MODEL=claude-opus-4-7[1m]`) and update the matching OpenClaw `contextWindow` value to `1000000`.
 
 ---
 
@@ -334,6 +342,7 @@ openclaw-claude-bridge/
 - **`/cleanup`** is disabled unless `DASHBOARD_PASS` is set, and requires Basic Auth plus an explicit API-intent header when enabled
 - **`--tools ""`** disables all Claude native tools — no host command execution
 - **`--dangerously-skip-permissions`** is opt-in via `OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS=1` for trusted local sandbox/headless deployments that knowingly need it
+- **Remote attachments** are limited to HTTP(S), block credentials, localhost/private/metadata ranges and private DNS results, and revalidate every manual redirect plus again before body consumption. Node `fetch` does not expose a stable socket IP here, so this is DNS-rebinding hardening rather than true socket-level IP pinning.
 - **`.env`** contains secrets and is gitignored
 
 ---
