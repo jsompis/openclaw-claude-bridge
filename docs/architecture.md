@@ -208,15 +208,18 @@ The bridge parses these blocks (`parseToolCalls` in `src/tool-parser.js`) and co
 }
 ```
 
-### Blocked Tools
+### Tool Authority
 
-Certain OC-internal tools are blocked from appearing in Claude's available tools list:
+The bridge does not maintain a hardcoded denylist for OpenClaw tool names.
+If OpenClaw includes a tool in the request `tools` array, the bridge exposes
+that same tool in Claude's prompt and accepts matching `<tool_call>` output
+back as an OpenAI-compatible `tool_calls` response. OpenClaw remains the
+source of truth for policy, execution, idempotency, and authorization.
 
-- `sessions_send` — OC session management
-- `sessions_spawn` — OC session spawning
-- `gateway` — OC gateway control
-
-These are infrastructure tools that Claude should never call.
+In particular, OpenClaw control-plane tools such as `sessions_send`,
+`sessions_spawn`, or `gateway` are pass-through when OpenClaw intentionally
+provides them. The bridge must not impose a second stale policy layer that
+can disagree with OpenClaw's current tool list.
 
 ### Response Cleaning
 

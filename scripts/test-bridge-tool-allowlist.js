@@ -75,34 +75,34 @@ async function main() {
   });
   const tools = [gatewayTool, sessionsSendTool, sessionsSpawnTool, safeTool];
 
-  assert.strictEqual(isBridgeAllowedToolName('gateway'), false);
-  assert.strictEqual(isBridgeAllowedToolName('sessions_send'), false);
-  assert.strictEqual(isBridgeAllowedToolName('sessions_spawn'), false);
+  assert.strictEqual(isBridgeAllowedToolName('gateway'), true);
+  assert.strictEqual(isBridgeAllowedToolName('sessions_send'), true);
+  assert.strictEqual(isBridgeAllowedToolName('sessions_spawn'), true);
   assert.strictEqual(isBridgeAllowedToolName('read'), true);
-  assert.deepStrictEqual(filterBridgeAllowedTools(tools).map(t => t.function.name), ['read']);
-  assert.deepStrictEqual(Array.from(bridgeAllowedToolNames(tools)), ['read']);
+  assert.deepStrictEqual(filterBridgeAllowedTools(tools).map(t => t.function.name), ['gateway', 'sessions_send', 'sessions_spawn', 'read']);
+  assert.deepStrictEqual(Array.from(bridgeAllowedToolNames(tools)), ['gateway', 'sessions_send', 'sessions_spawn', 'read']);
 
   const instructions = buildToolInstructions(tools);
-  assert.ok(!instructions.includes('gateway'), 'prompt instructions must hide gateway');
-  assert.ok(!instructions.includes('sessions_send'), 'prompt instructions must hide sessions_send');
-  assert.ok(!instructions.includes('sessions_spawn'), 'prompt instructions must hide sessions_spawn');
+  assert.ok(instructions.includes('**gateway**'), 'prompt instructions must reflect OpenClaw-provided gateway tool');
+  assert.ok(instructions.includes('**sessions_send**'), 'prompt instructions must reflect OpenClaw-provided sessions_send tool');
+  assert.ok(instructions.includes('**sessions_spawn**'), 'prompt instructions must reflect OpenClaw-provided sessions_spawn tool');
   assert.ok(instructions.includes('**read**'), 'prompt instructions must retain safe tool');
   assert.ok(instructions.includes('schema: {"type":"object","required":["path"]'), 'prompt instructions must include compact JSON schema');
   assert.ok(instructions.includes('"path":{"type":"string","description":"Relative file path to read"}'), 'prompt instructions must include parameter fields');
-  assert.ok(!instructions.includes('"action"'), 'blocked tool schemas must not leak into prompt instructions');
+  assert.ok(instructions.includes('"action"'), 'OpenClaw-provided tool schemas should be visible to Claude');
   assert.strictEqual(compactToolSchema(safeTool), '{"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Relative file path to read"},"offset":{"type":"integer","minimum":1}}}');
-  assert.strictEqual(buildToolInstructions([gatewayTool]), '', 'blocked-only tools should produce no tool instructions');
+  assert.ok(buildToolInstructions([gatewayTool]).includes('**gateway**'), 'bridge must not impose a second hardcoded internal-tool policy');
 
   const calls = [];
   __setRunClaudeForTests(async (systemPrompt, promptText) => {
     calls.push({ systemPrompt, promptText });
-    if (promptText.includes('blocked tool')) {
+    if (promptText.includes('gateway tool')) {
       return {
         text: '<tool_call>{"name":"gateway","arguments":{"action":"restart"}}</tool_call>',
         usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
       };
     }
-    if (promptText.includes('malformed blocked markup')) {
+    if (promptText.includes('malformed sessions spawn markup')) {
       return {
         text: 'thinking <tool_call>{"name":"sessions_spawn","arguments":{"prompt":"secret"}}',
         usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
@@ -117,33 +117,33 @@ async function main() {
   const server = await listen(app);
   try {
     const port = server.address().port;
-    const blocked = await postJson(port, {
+    const gateway = await postJson(port, {
       model: 'claude-opus-4-7',
       stream: false,
       tools,
-      messages: [{ role: 'user', content: 'please emit blocked tool' }],
+      messages: [{ role: 'user', content: 'please emit gateway tool' }],
     });
-    assert.strictEqual(blocked.status, 200, blocked.body);
+    assert.strictEqual(gateway.status, 200, gateway.body);
     assert.strictEqual(calls.length, 1);
-    assert.ok(!calls[0].systemPrompt.includes('gateway'), 'server prompt must hide gateway');
-    assert.ok(!calls[0].systemPrompt.includes('sessions_send'), 'server prompt must hide sessions_send');
-    assert.ok(!calls[0].systemPrompt.includes('sessions_spawn'), 'server prompt must hide sessions_spawn');
+    assert.ok(calls[0].systemPrompt.includes('**gateway**'), 'server prompt must reflect gateway tool when OpenClaw provides it');
+    assert.ok(calls[0].systemPrompt.includes('**sessions_send**'), 'server prompt must reflect sessions_send when OpenClaw provides it');
+    assert.ok(calls[0].systemPrompt.includes('**sessions_spawn**'), 'server prompt must reflect sessions_spawn when OpenClaw provides it');
     assert.ok(calls[0].systemPrompt.includes('**read**'), 'server prompt must keep safe tool');
     assert.ok(calls[0].systemPrompt.includes('schema: {"type":"object","required":["path"]'), 'server prompt must include safe tool schema');
-    assert.ok(!blocked.json.choices[0].message.tool_calls, 'blocked gateway call must not be executable');
-    assert.strictEqual(blocked.json.choices[0].message.content, '[Bridge blocked invalid internal tool markup; no tool was executed.]');
-    assert.strictEqual(blocked.json.choices[0].finish_reason, 'stop');
+    assert.strictEqual(gateway.json.choices[0].finish_reason, 'tool_calls');
+    assert.strictEqual(gateway.json.choices[0].message.tool_calls.length, 1);
+    assert.strictEqual(gateway.json.choices[0].message.tool_calls[0].function.name, 'gateway');
 
-    const malformedBlocked = await postJson(port, {
+    const malformedSessionsSpawn = await postJson(port, {
       model: 'claude-opus-4-7',
       stream: false,
       tools,
-      messages: [{ role: 'user', content: 'please emit malformed blocked markup' }],
+      messages: [{ role: 'user', content: 'please emit malformed sessions spawn markup' }],
     });
-    assert.strictEqual(malformedBlocked.status, 200, malformedBlocked.body);
-    assert.ok(!malformedBlocked.json.choices[0].message.tool_calls, 'malformed sessions_spawn call must not be executable');
-    assert.strictEqual(malformedBlocked.json.choices[0].message.content, '[Bridge blocked invalid internal tool markup; no tool was executed.]');
-    assert.strictEqual(malformedBlocked.json.choices[0].finish_reason, 'stop');
+    assert.strictEqual(malformedSessionsSpawn.status, 200, malformedSessionsSpawn.body);
+    assert.strictEqual(malformedSessionsSpawn.json.choices[0].finish_reason, 'tool_calls');
+    assert.strictEqual(malformedSessionsSpawn.json.choices[0].message.tool_calls.length, 1);
+    assert.strictEqual(malformedSessionsSpawn.json.choices[0].message.tool_calls[0].function.name, 'sessions_spawn');
 
     const safe = await postJson(port, {
       model: 'claude-opus-4-7',

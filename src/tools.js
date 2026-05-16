@@ -1,16 +1,11 @@
 'use strict';
 
-// Gateway-internal tools that should not be listed as available to Claude or
-// accepted back from bridge-emitted <tool_call> markup. These are OC
-// infrastructure tools, not user-facing.
-const GATEWAY_BLOCKED = new Set(['sessions_send', 'sessions_spawn', 'gateway']);
-
 function toolName(tool) {
     return tool?.function?.name || tool?.name || '';
 }
 
 function isBridgeAllowedToolName(name) {
-    return Boolean(name) && !GATEWAY_BLOCKED.has(name);
+    return Boolean(name);
 }
 
 function filterBridgeAllowedTools(tools) {
