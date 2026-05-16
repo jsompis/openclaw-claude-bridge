@@ -3,14 +3,16 @@
 // Routing helpers for resolving an inbound /v1/chat/completions request to a
 // stable Claude CLI session.
 //
-// Five identifiers are inspected, in priority order:
-//   1. conversationLabel — JSON block "Conversation info (untrusted metadata)"
-//      embedded by OpenClaw in user/developer/system text. Used for multi-agent
-//      channels.
-//   2. openclawSessionKey  — x-openclaw-session-key HTTP header. Stable for
+// Five identifiers are inspected, in priority order. Trusted transport/context
+// signals intentionally outrank user-visible prompt metadata so a spoofed
+// "Conversation info" block cannot override a stable OpenClaw route:
+//   1. openclawSessionKey  — x-openclaw-session-key HTTP header. Stable for
 //      transports that forward custom headers.
-//   3. inboundContext    — "Inbound Context (trusted metadata)" JSON block in
+//   2. inboundContext    — "Inbound Context (trusted metadata)" JSON block in
 //      the system prompt; used when transports drop custom headers.
+//   3. conversationLabel — JSON block "Conversation info (untrusted metadata)"
+//      embedded by OpenClaw in user/developer/system text. Legacy fallback for
+//      older channel metadata when no trusted route signal is present.
 //   4. promptCacheKey    — req.body.prompt_cache_key (OpenAI-style). OpenClaw
 //      attaches the agent session id here, so subagent/cron sessions stay
 //      stable across turns.
@@ -141,10 +143,10 @@ function extractRoutingSignals({ req, body, messages }) {
 }
 
 // Default priority used by the main /v1/chat/completions handler.
-const MAIN_PRIORITY = ['conversationLabel', 'openclawSessionKey', 'inboundContext', 'promptCacheKey', 'openAiUser'];
-// Memflush path historically skips openclawSessionKey routing (it intercepts
-// before that fallback was added). Preserve byte-for-byte.
-const MEMFLUSH_PRIORITY = ['conversationLabel', 'inboundContext', 'promptCacheKey', 'openAiUser'];
+const MAIN_PRIORITY = ['openclawSessionKey', 'inboundContext', 'conversationLabel', 'promptCacheKey', 'openAiUser'];
+// Memflush path still skips openclawSessionKey routing, but trusted inbound
+// context outranks the legacy untrusted conversation block.
+const MEMFLUSH_PRIORITY = ['inboundContext', 'conversationLabel', 'promptCacheKey', 'openAiUser'];
 
 /**
  * Pick the active routingSource/routingLabel/routingKey/displayChannel from a
@@ -185,7 +187,7 @@ function pickRouting(signals, priority = MAIN_PRIORITY) {
     const routingKey = routingLabel ? `${routingSource}:${routingLabel}` : null;
 
     let displayChannel = null;
-    if (convLabel) {
+    if (routingSource === 'conversationLabel') {
         displayChannel = convLabel;
     } else if (routingSource === 'openclawSessionKey') {
         displayChannel = `session:${ocSessionKey}`;

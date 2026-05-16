@@ -2,10 +2,14 @@ import { useState, useEffect, useCallback, useMemo } from "react"
 import { useStatus } from "@/hooks/use-status"
 import { groupByAgent } from "@/lib/group"
 import type { AgentGroup } from "@/lib/group"
+import type { LogEntry } from "@/lib/types"
 import { fmtUptime, fmtSize } from "@/lib/format"
 import { Sidebar } from "@/components/Sidebar"
 import { AgentPanel } from "@/components/AgentPanel"
 import { ActivityFeed } from "@/components/ActivityFeed"
+
+const EMPTY_LOG: LogEntry[] = []
+const EMPTY_ACTIVITY: NonNullable<import("@/lib/types").StatusData["activity"]> = []
 
 function useTheme() {
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -30,19 +34,12 @@ export default function App() {
   const { theme, toggle: toggleTheme } = useTheme()
   const [activeAgent, setActiveAgent] = useState<string | null>(null)
 
-  const log = data?.log || []
+  const log = data?.log ?? EMPTY_LOG
+  const activity = data?.activity ?? EMPTY_ACTIVITY
   const agentGroups = useMemo(() => groupByAgent(log), [log])
-
-  // If selected agent vanishes from data, fall back to All
-  useEffect(() => {
-    if (
-      activeAgent !== null &&
-      agentGroups.length &&
-      !agentGroups.find((g) => g.agent === activeAgent)
-    ) {
-      setActiveAgent(null)
-    }
-  }, [agentGroups, activeAgent])
+  const selectedAgentExists =
+    activeAgent === null || agentGroups.some((g) => g.agent === activeAgent)
+  const effectiveActiveAgent = selectedAgentExists ? activeAgent : null
 
   // Request ID → agent / channel lookup
   const reqToAgent = useMemo(() => {
@@ -113,16 +110,16 @@ export default function App() {
   const latestWithTools = data.log.find((e) => e.tools > 0)
 
   const filteredActivity =
-    activeAgent === null
-      ? (data.activity || [])
-      : (data.activity || []).filter(
-          (a) => reqToAgent.get(a.id) === activeAgent
+    effectiveActiveAgent === null
+      ? activity
+      : activity.filter(
+          (a) => reqToAgent.get(a.id) === effectiveActiveAgent
         )
 
   const activeGroup =
-    activeAgent === null
+    effectiveActiveAgent === null
       ? allGroup
-      : agentGroups.find((g) => g.agent === activeAgent) || allGroup
+      : agentGroups.find((g) => g.agent === effectiveActiveAgent) || allGroup
 
   return (
     <div className="h-screen p-1.5 sm:p-3 md:p-4">
@@ -181,7 +178,7 @@ export default function App() {
           {/* Sidebar */}
           <Sidebar
             agents={agentGroups}
-            activeAgent={activeAgent}
+            activeAgent={effectiveActiveAgent}
             onSelect={setActiveAgent}
           />
 
@@ -205,11 +202,11 @@ export default function App() {
               }>
                 Sessions
                 <span className="text-foreground/60 normal-case tracking-normal ml-1.5 text-[0.85rem]">
-                  / {activeAgent || "All Agents"}
+                  / {effectiveActiveAgent || "All Agents"}
                 </span>
               </SectionLabel>
               {activeGroup ? (
-                <AgentPanel group={activeGroup} isAllAgents={activeAgent === null} />
+                <AgentPanel key={activeGroup.agent} group={activeGroup} isAllAgents={effectiveActiveAgent === null} />
               ) : (
                 <div className="bg-card border border-border rounded-lg px-3.5 py-5">
                   <span className="text-muted-foreground/60 text-xs italic">

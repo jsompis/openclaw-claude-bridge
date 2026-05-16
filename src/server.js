@@ -284,7 +284,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         const { routingSource, routingKey } = routing;
         logEntry.routingSource = routingSource;
         if (routingKey) {
-            console.log(`[${requestId}] OC channel: "${convLabel || ocSessionKey || inboundLabel || promptCacheKey || openAiUser}" source=${routingSource} agent: "${agentName || '(none)'}" routingKey: "${routingKey}"`);
+            console.log(`[${requestId}] OC channel: "${routing.routingLabel || routing.displayChannel || '(none)'}" source=${routingSource} agent: "${agentName || '(none)'}" routingKey: "${routingKey}"`);
         }
 
         // --- Global concurrent limit; same-channel work is serialized below ---

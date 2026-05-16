@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react"
+import { useState, useMemo } from "react"
 import type { AgentGroup } from "@/lib/group"
 import { hm, K, fmtModel, pct, fmtResume } from "@/lib/format"
 import {
@@ -30,17 +30,6 @@ export function AgentPanel({ group, isAllAgents }: AgentPanelProps) {
   const [resumeFilter, setResumeFilter] = useState<string | null>(null)
   const [page, setPage] = useState(0)
   const PAGE_SIZE = 25
-
-  // Reset filters when agent changes
-  const prevAgent = useRef(group.agent)
-  useEffect(() => {
-    if (prevAgent.current !== group.agent) {
-      setChannelFilter(null)
-      setResumeFilter(null)
-      setPage(0)
-      prevAgent.current = group.agent
-    }
-  }, [group.agent])
 
   const { channels, entries } = group
 

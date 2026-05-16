@@ -335,6 +335,12 @@ function _cidrContains(ip, range) {
 function _isBlockedHostname(hostname) {
     const host = _normalizeHostname(hostname);
     if (host === 'localhost' || host.endsWith('.localhost')) return true;
+    // Reject common private/discovery suffixes before DNS resolution. These names
+    // often resolve via local network services and should never be attachment
+    // download targets.
+    if (host.endsWith('.local') || host.endsWith('.internal') || host.endsWith('.localdomain') || host.endsWith('.lan') || host.endsWith('.home')) {
+        return true;
+    }
     return new Set([
         'metadata',
         'metadata.google.internal',
@@ -391,6 +397,9 @@ async function _validateRemoteUrlForDownload(inputUrl) {
     const parsed = inputUrl instanceof URL ? inputUrl : new URL(inputUrl);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
         throw new Error('remote attachment URL blocked by SSRF policy: unsupported protocol ' + parsed.protocol);
+    }
+    if (parsed.username || parsed.password) {
+        throw new Error('remote attachment URL blocked by SSRF policy: credentials are not allowed');
     }
 
     const hostname = _normalizeHostname(parsed.hostname);

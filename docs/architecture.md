@@ -30,7 +30,7 @@ Every request to `POST /v1/chat/completions` goes through these stages:
 ```
 1. INTERCEPT     Is this a memory flush or /new startup? → return NO_REPLY
 2. IDENTIFY      Extract routing signals + agent name → build routing key
-3. RATE LIMIT    Check per-channel and global concurrent limits
+3. QUEUE/LIMIT   Serialize same-route work and check the global concurrent limit
 4. SESSION       Map lookup/fallback routing → resume existing or create new
 5. TRANSLATE     Convert OpenAI messages → Claude CLI text format
 6. SPAWN         Launch claude --print subprocess, pipe prompt via stdin
@@ -50,11 +50,11 @@ A plain `tools: []` request is not enough to trigger this interception; ordinary
 
 ### Identity Extraction (Step 2)
 
-The bridge extracts stable routing signals from the request, in priority order:
+The bridge extracts stable routing signals from the request, in priority order. Trusted OpenClaw transport/context signals outrank user-visible prompt metadata, so a spoofed `Conversation info` block cannot override a stable trusted route:
 
-1. **Conversation label**: Parsed from the `Conversation info (untrusted metadata)` JSON block in user messages. Format: `Guild #channel-name` for group chats, `dm:username` for DMs.
-2. **`x-openclaw-session-key`**: HTTP header used by transports that preserve custom provider headers.
-3. **Inbound Context**: Parsed from the `Inbound Context (trusted metadata)` block when custom headers are dropped.
+1. **`x-openclaw-session-key`**: HTTP header used by transports that preserve custom provider headers.
+2. **Inbound Context**: Parsed from the `Inbound Context (trusted metadata)` block when custom headers are dropped.
+3. **Conversation label**: Parsed from the `Conversation info (untrusted metadata)` JSON block in user messages. Format: `Guild #channel-name` for group chats, `dm:username` for DMs. This is a legacy fallback only when no trusted OpenClaw route signal is present.
 4. **`prompt_cache_key`**: OpenAI-style request field used as a routing fallback for OpenClaw subagent/cron flows where the agent session id is carried there.
 5. **`user`**: Final fallback for raw OpenAI-compatible clients.
 
@@ -469,15 +469,13 @@ Sessions older than 24 hours are automatically deleted on startup. Manual dashbo
 
 ## Concurrency Control
 
-### Per-Channel Limit
+### Per-Channel Serialization
 
-Each routing key (channel + agent) has a maximum of 2 concurrent requests (`MAX_PER_CHANNEL`). This prevents bug loops — if an agent gets into an infinite tool-calling cycle, it can't consume all available resources.
+Requests for the same routing key are serialized one-at-a-time before they touch Claude CLI session state. This preserves request order and prevents two concurrent turns from racing against the same Claude session. There is no `MAX_PER_CHANNEL` knob; older docs/env examples that mentioned it were stale.
 
 ### Global Limit
 
-A global maximum of 20 concurrent requests (`MAX_GLOBAL`) acts as a safety net across all channels.
-
-When limits are hit, requests receive HTTP 429 with a descriptive error message.
+A global maximum of 20 concurrent requests (`MAX_GLOBAL`) acts as a safety net across all channels. When the global limit is hit, requests receive HTTP 429 with a descriptive error message.
 
 ### Memory Garbage Collection
 

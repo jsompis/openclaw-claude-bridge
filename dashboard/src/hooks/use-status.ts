@@ -165,9 +165,12 @@ export function useStatus() {
 
   useEffect(() => {
     if (USE_MOCK) return
-    refresh()
-    const id = setInterval(refresh, POLL_INTERVAL)
-    return () => clearInterval(id)
+    const initialId = window.setTimeout(() => void refresh(), 0)
+    const intervalId = window.setInterval(() => void refresh(), POLL_INTERVAL)
+    return () => {
+      window.clearTimeout(initialId)
+      window.clearInterval(intervalId)
+    }
   }, [refresh])
 
   const cleanup = useCallback(async () => {

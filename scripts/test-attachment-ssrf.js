@@ -72,6 +72,10 @@ async function assertSkippedBySsrf(classifyPartsAsync, url, message) {
     'http://[ff02::1]/image.png',
     'http://[::ffff:127.0.0.1]/image.png',
     'http://metadata.google.internal/computeMetadata/v1/',
+    'https://user:pass@example.com/image.png',
+    'http://printer.local/image.png',
+    'http://service.internal/image.png',
+    'http://router.lan/image.png',
   ]) {
     await assertSkippedBySsrf(classifyPartsAsync, url, `blocked URL should be skipped: ${url}`);
   }
