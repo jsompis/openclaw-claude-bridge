@@ -223,6 +223,39 @@ function parseMalformedToolCall(text, allowedToolNames) {
     return { calls: [result.call], repaired: true, closeTag: closeCandidates[0]?.tag || 'EOF', recoveredJson: result.recovered };
 }
 
+function parseBareToolCallJson(text, allowedToolNames) {
+    const source = String(text || '');
+    const searchable = stripCodeContexts(source);
+    const trimmedSearchable = searchable.trim();
+    if (!trimmedSearchable || trimmedSearchable[0] !== '{' || trimmedSearchable[trimmedSearchable.length - 1] !== '}') {
+        return { calls: [], bare: false };
+    }
+
+    const objects = extractBalancedJsonObjects(trimmedSearchable);
+    if (objects.length !== 1 || objects[0] !== trimmedSearchable) {
+        return { calls: [], bare: false };
+    }
+
+    const trimStart = searchable.indexOf(trimmedSearchable);
+    const raw = source.slice(trimStart, trimStart + trimmedSearchable.length).trim();
+    let parsed;
+    try {
+        parsed = parseLooseJson(raw).parsed;
+    } catch {
+        return { calls: [], bare: false };
+    }
+
+    if (!parsed || typeof parsed.name !== 'string' || !Object.prototype.hasOwnProperty.call(parsed, 'arguments')) {
+        return { calls: [], bare: false };
+    }
+
+    const result = coerceToolCall(raw, allowedToolNames);
+    if (!result.call) {
+        return { calls: [], bare: true, reason: result.error, error: result };
+    }
+    return { calls: [result.call], bare: true, recoveredJson: result.recovered };
+}
+
 function parseToolCallsDetailed(text, opts = {}) {
     const source = String(text || '');
     const allowedToolNames = opts.allowedToolNames || null;
@@ -234,7 +267,28 @@ function parseToolCallsDetailed(text, opts = {}) {
     }
 
     if (!hadToolCallMarkup) {
-        return { calls: [], repaired: false, hadToolCallMarkup: false, errors: exact.errors };
+        const bare = parseBareToolCallJson(source, allowedToolNames);
+        if (bare.calls.length > 0) {
+            return {
+                calls: bare.calls,
+                repaired: false,
+                hadToolCallMarkup: false,
+                hadBareToolCallJson: true,
+                errors: exact.errors,
+                recoveredJson: !!bare.recoveredJson,
+            };
+        }
+        if (bare.bare) {
+            return {
+                calls: [],
+                repaired: false,
+                hadToolCallMarkup: false,
+                hadBareToolCallJson: true,
+                malformedReason: bare.reason,
+                errors: exact.errors.concat(bare.error ? [bare.error] : []),
+            };
+        }
+        return { calls: [], repaired: false, hadToolCallMarkup: false, hadBareToolCallJson: false, errors: exact.errors };
     }
 
     const malformed = parseMalformedToolCall(source, allowedToolNames);

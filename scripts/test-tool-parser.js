@@ -52,6 +52,34 @@ const close = '</tool_call>';
 }
 
 {
+    const result = parseToolCallsDetailed('{"name":"exec","arguments":{"command":"echo bare"}}', { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 1, 'bare tool-call JSON must parse as a structured tool call');
+    assert.strictEqual(result.hadBareToolCallJson, true);
+    assert.strictEqual(result.calls[0].name, 'exec');
+    assert.deepStrictEqual(result.calls[0].arguments, { command: 'echo bare' });
+}
+
+{
+    const result = parseToolCallsDetailed('  {"name":"read","arguments":{"path":"README.md"}}\n', { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 1, 'whitespace-wrapped bare tool-call JSON must parse');
+    assert.strictEqual(result.hadBareToolCallJson, true);
+    assert.strictEqual(result.calls[0].name, 'read');
+}
+
+{
+    const result = parseToolCallsDetailed('{"name":"gateway","arguments":{}}', { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 0);
+    assert.strictEqual(result.hadBareToolCallJson, true, 'disallowed bare tool-call JSON should be recognized as internal tool syntax');
+    assert.strictEqual(result.malformedReason, 'tool_not_allowed');
+}
+
+{
+    const result = parseToolCallsDetailed('Use this JSON: {"name":"exec","arguments":{"command":"echo example"}}', { allowedToolNames: allowed });
+    assert.strictEqual(result.calls.length, 0, 'prose plus JSON must stay normal text');
+    assert.strictEqual(result.hadBareToolCallJson, false);
+}
+
+{
     const result = parseToolCallsDetailed('<tool_call>{"name":"exec","arguments":{}}</tool_char><tool_call>{"name":"read","arguments":{}}</tool_char>', { allowedToolNames: allowed });
     assert.strictEqual(result.calls.length, 0);
     assert.strictEqual(result.repaired, false);

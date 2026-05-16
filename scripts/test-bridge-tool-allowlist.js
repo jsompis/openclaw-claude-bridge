@@ -108,6 +108,12 @@ async function main() {
         usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
       };
     }
+    if (promptText.includes('bare exec json')) {
+      return {
+        text: '{"name":"exec","arguments":{"command":"python3 tools/agent-ops-runner/daily_approval_runtime.py run_full_pipeline","cwd":"/Users/sompisjunsui/.openclaw/workspace","yieldMs":1000,"timeout":900}}',
+        usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
+      };
+    }
     return {
       text: '<tool_call>{"name":"read","arguments":{"path":"README.md"}}</tool_call>',
       usage: { input_tokens: 1, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 1, cost_usd: 0 },
@@ -156,6 +162,23 @@ async function main() {
     assert.strictEqual(safe.json.choices[0].finish_reason, 'tool_calls');
     assert.strictEqual(safe.json.choices[0].message.tool_calls.length, 1);
     assert.strictEqual(safe.json.choices[0].message.tool_calls[0].function.name, 'read');
+
+    const bareExec = await postJson(port, {
+      model: 'claude-opus-4-7',
+      stream: false,
+      tools: [functionTool('exec', 'run a command')],
+      messages: [{ role: 'user', content: 'please emit bare exec json' }],
+    });
+    assert.strictEqual(bareExec.status, 200, bareExec.body);
+    assert.strictEqual(bareExec.json.choices[0].finish_reason, 'tool_calls');
+    assert.strictEqual(bareExec.json.choices[0].message.tool_calls.length, 1);
+    assert.strictEqual(bareExec.json.choices[0].message.tool_calls[0].function.name, 'exec');
+    assert.deepStrictEqual(JSON.parse(bareExec.json.choices[0].message.tool_calls[0].function.arguments), {
+      command: 'python3 tools/agent-ops-runner/daily_approval_runtime.py run_full_pipeline',
+      cwd: '/Users/sompisjunsui/.openclaw/workspace',
+      yieldMs: 1000,
+      timeout: 900,
+    });
   } finally {
     __setRunClaudeForTests(null);
     await close(server);

@@ -643,7 +643,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             console.warn(`[${requestId}] WARNING malformed_tool_call_json_recovered`);
         }
 
-        const rawMarkupPresent = hasInternalBridgeMarkup(finalText || '');
+        const rawMarkupPresent = hasInternalBridgeMarkup(finalText || '') || !!toolCallResult.hadBareToolCallJson;
 
         if (toolCalls.length > 0) {
             // Claude requested tools → return as OpenAI tool_calls for OC to execute
