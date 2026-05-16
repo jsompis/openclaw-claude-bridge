@@ -22,15 +22,27 @@ if (mode === 'close-before-result') {
 }
 
 let count = 0;
+let heartbeat = null;
 const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', () => {
   count += 1;
-  process.stdout.write(JSON.stringify({
+  const result = JSON.stringify({
     type: 'result',
     result: 'fake live result pid=' + process.pid + ' count=' + count,
     usage: { input_tokens: 1, output_tokens: 1 },
     total_cost_usd: 0,
-  }) + '\\n');
+  });
+  if (mode === 'no-newline-result') {
+    process.stdout.write(result, () => process.exit(0));
+    return;
+  }
+  if (mode === 'heartbeat-no-result') {
+    heartbeat = heartbeat || setInterval(() => {
+      process.stdout.write(JSON.stringify({ type: 'system', subtype: 'heartbeat' }) + '\\n');
+    }, 10);
+    return;
+  }
+  process.stdout.write(result + '\\n');
   if (mode === 'exit-after-result') process.exit(0);
 });
 
@@ -40,6 +52,7 @@ setInterval(() => {}, 1000);
 process.env.CLAUDE_BIN = fakeClaude;
 process.env.OPENCLAW_BRIDGE_CLAUDE_LIVE = '1';
 process.env.OPENCLAW_BRIDGE_CLAUDE_LIVE_IDLE_MS = '80';
+process.env.HARD_TIMEOUT_MS = '700';
 
 delete process.env.DASHBOARD_PASS;
 process.env.OPENCLAW_BRIDGE_ENV_FILE = path.join(REPO_ROOT, '.env.test-missing');
@@ -161,6 +174,19 @@ async function main() {
   assert.match(exitResult.text, /fake live result/);
   await waitFor(() => getLiveProcessInfo().count === 0, 'natural child close cleanup');
   await assertLiveCount(0, 'natural close should clear live process map');
+
+  const noNewlineSession = 'live-no-newline-session';
+  const noNewlineResult = await runFake('no-newline-result', noNewlineSession);
+  assert.match(noNewlineResult.text, /fake live result/, 'live mode should parse final buffered result without trailing newline');
+  await waitFor(() => getLiveProcessInfo().count === 0, 'no-newline child close cleanup');
+
+  const hardTimeoutSession = 'live-hard-timeout-session';
+  await assert.rejects(
+    () => runFake('heartbeat-no-result', hardTimeoutSession),
+    /Hard timeout/,
+    'live mode should enforce absolute hard timeout even while stdout stays active',
+  );
+  await waitFor(() => getLiveProcessInfo().count === 0, 'hard-timeout live process cleanup');
 
   const errorSession = 'live-error-session';
   await assert.rejects(

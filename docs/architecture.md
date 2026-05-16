@@ -387,9 +387,9 @@ Idle live processes are shut down after `OPENCLAW_BRIDGE_CLAUDE_LIVE_IDLE_MS`; t
 |---|---|---|
 | **Active-request idle timeout** | 2 min (configurable with `IDLE_TIMEOUT_MS`) | Kill if no stdout activity for this long during an active request. Reset on every output chunk. |
 | **Live process idle shutdown** | 10 min (configurable with `OPENCLAW_BRIDGE_CLAUDE_LIVE_IDLE_MS`) | Stop an opt-in Phase 1 live Claude process after this many ms with no requests. |
-| **Hard timeout** | 20 min | Absolute maximum runtime regardless of activity for the default per-request path. |
+| **Hard timeout** | 20 min (configurable with `HARD_TIMEOUT_MS`) | Absolute maximum runtime regardless of activity for both per-request and live-mode active turns. |
 
-The active-request idle timeout catches stuck processes while allowing long tool chains (which produce output) to continue. The hard timeout is a safety net for the default per-request path.
+The active-request idle timeout catches stuck processes while allowing long tool chains (which produce output) to continue. The hard timeout is a safety net for both default per-request runs and opt-in live-mode turns that keep producing output but never finish.
 
 ### Client Disconnect
 

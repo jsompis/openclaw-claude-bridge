@@ -80,6 +80,7 @@ function getContextWindow(modelId) {
  */
 
 const IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_MS) || 120000; // 2 min idle = dead
+const HARD_TIMEOUT_MS = parseInt(process.env.HARD_TIMEOUT_MS) || 20 * 60 * 1000; // 20 min absolute max
 const CLAUDE_SKIP_PERMISSIONS_ENV = 'OPENCLAW_BRIDGE_CLAUDE_SKIP_PERMISSIONS';
 const CLAUDE_LIVE_ENV = 'OPENCLAW_BRIDGE_CLAUDE_LIVE';
 const CLAUDE_LIVE_IDLE_MS_ENV = 'OPENCLAW_BRIDGE_CLAUDE_LIVE_IDLE_MS';
@@ -227,6 +228,7 @@ class ClaudeLiveProcess {
         this.closed = false;
         this.closeError = null;
         this.activeIdleTimer = null;
+        this.activeHardTimer = null;
         this.liveIdleTimer = null;
 
         const args = buildClaudeLiveArgs({ model, isResume, sessionId, systemPrompt, reasoningEffort });
@@ -269,6 +271,7 @@ class ClaudeLiveProcess {
             let abortHandler = null;
             const cleanup = () => {
                 this.clearActiveIdle();
+                this.clearActiveHard();
                 if (signal && abortHandler) {
                     signal.removeEventListener('abort', abortHandler);
                 }
@@ -288,7 +291,7 @@ class ClaudeLiveProcess {
                 const fullUsage = this.current.fullUsage;
                 const detail = this.stderrText ? `: ${this.stderrText.split('\n').slice(-3).join(' | ')}` : '';
                 this.current = null;
-                this.scheduleLiveIdleShutdown();
+                if (!this.closed) this.scheduleLiveIdleShutdown();
 
                 const text = typeof fullText === 'string' ? fullText.trim() : '';
                 if (!text && (fullUsage.output_tokens ?? 0) === 0) {
@@ -316,6 +319,7 @@ class ClaudeLiveProcess {
             }
 
             this.resetActiveIdle();
+            this.startActiveHard();
             try {
                 this.proc.stdin.write(JSON.stringify(buildStreamJsonUserMessage(promptText, attachmentBlocks)) + '\n');
             } catch (err) {
@@ -338,6 +342,20 @@ class ClaudeLiveProcess {
         this.activeIdleTimer = null;
     }
 
+    startActiveHard() {
+        this.clearActiveHard();
+        this.activeHardTimer = setTimeout(() => {
+            const reason = `Hard timeout (${HARD_TIMEOUT_MS / 60000}min)`;
+            this.stop(reason);
+            if (this.current) this.current.reject(new Error(reason));
+        }, HARD_TIMEOUT_MS);
+    }
+
+    clearActiveHard() {
+        clearTimeout(this.activeHardTimer);
+        this.activeHardTimer = null;
+    }
+
     scheduleLiveIdleShutdown() {
         clearTimeout(this.liveIdleTimer);
         this.liveIdleTimer = setTimeout(() => {
@@ -355,23 +373,33 @@ class ClaudeLiveProcess {
         for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed) continue;
-            let event;
-            try {
-                event = JSON.parse(trimmed);
-            } catch {
-                continue;
-            }
-            if (!this.current) continue;
-            handleEvent(
-                event,
-                this.current.onChunk,
-                (text) => { this.current.fullText = text; },
-                (u) => { this.current.fullUsage = u; },
-            );
-            if (event.type === 'result') {
-                this.current.resolve();
-            }
+            this.processStdoutLine(trimmed);
         }
+    }
+
+    processStdoutLine(trimmed) {
+        let event;
+        try {
+            event = JSON.parse(trimmed);
+        } catch {
+            return;
+        }
+        if (!this.current) return;
+        handleEvent(
+            event,
+            this.current.onChunk,
+            (text) => { this.current.fullText = text; },
+            (u) => { this.current.fullUsage = u; },
+        );
+        if (event.type === 'result') {
+            this.current.resolve();
+        }
+    }
+
+    flushBufferedStdout() {
+        const trimmed = this.buffer.trim();
+        this.buffer = '';
+        if (trimmed) this.processStdoutLine(trimmed);
     }
 
     onStderr(data) {
@@ -386,6 +414,7 @@ class ClaudeLiveProcess {
         this.closed = true;
         clearTimeout(this.liveIdleTimer);
         this.clearActiveIdle();
+        this.clearActiveHard();
         liveProcessMap.delete(this.key);
         const detail = this.stderrText ? `: ${this.stderrText.split('\n').slice(-3).join(' | ')}` : '';
         const closeError = new Error(`Claude live process exited with code ${code}${detail}`);
@@ -393,8 +422,17 @@ class ClaudeLiveProcess {
             this.closeError = closeError;
         }
         if (this.current) {
-            this.current.reject(closeError);
-            this.current = null;
+            this.flushBufferedStdout();
+        }
+        if (this.current) {
+            const text = typeof this.current.fullText === 'string' ? this.current.fullText.trim() : '';
+            if (code !== 0 && !text) {
+                this.current.reject(closeError);
+            } else if (!text && (this.current.fullUsage.output_tokens ?? 0) === 0) {
+                this.current.reject(new Error(`Claude returned empty response${detail}`));
+            } else {
+                this.current.resolve();
+            }
         }
     }
 
@@ -402,6 +440,7 @@ class ClaudeLiveProcess {
         this.closed = true;
         clearTimeout(this.liveIdleTimer);
         this.clearActiveIdle();
+        this.clearActiveHard();
         liveProcessMap.delete(this.key);
         this.closeError = new Error(`Failed to spawn Claude live process: ${err.message}`);
         if (this.current) {
@@ -417,6 +456,7 @@ class ClaudeLiveProcess {
         this.closeError = this.closeError || new Error(`Claude live process stopped: ${reason}`);
         clearTimeout(this.liveIdleTimer);
         this.clearActiveIdle();
+        this.clearActiveHard();
         liveProcessMap.delete(this.key);
         try { this.proc.kill('SIGTERM'); } catch {}
         setTimeout(() => { try { this.proc.kill('SIGKILL'); } catch {} }, 3000).unref?.();
@@ -628,8 +668,7 @@ function runClaude(systemPrompt, promptText, modelId, onChunk, signal, reasoning
         };
 
         // Hard timeout: absolute max runtime regardless of activity (20 min)
-        const MAX_RUN_MS = 20 * 60 * 1000;
-        const hardTimer = setTimeout(() => kill(`Hard timeout (${MAX_RUN_MS / 60000}min)`), MAX_RUN_MS);
+        const hardTimer = setTimeout(() => kill(`Hard timeout (${HARD_TIMEOUT_MS / 60000}min)`), HARD_TIMEOUT_MS);
 
         // Write conversation to stdin
         // Stream-json input: one user message with text + image/document blocks.

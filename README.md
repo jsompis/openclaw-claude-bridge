@@ -170,6 +170,7 @@ At startup the bridge loads the repo-root `.env` file before importing modules t
 | `SONNET_MODEL` | No | `claude-sonnet-4-6` | Claude CLI model override for `claude-sonnet-4-6` |
 | `HAIKU_MODEL` | No | `claude-haiku-4-5` | Claude CLI model override for `claude-haiku-4-5` |
 | `IDLE_TIMEOUT_MS` | No | `120000` | Kill an active CLI request after this many ms of no stdout activity |
+| `HARD_TIMEOUT_MS` | No | `1200000` | Absolute max runtime for an active CLI request, including live-mode turns |
 | `OPENCLAW_BRIDGE_CLAUDE_LIVE` | No | unset/off | Experimental Phase 1 opt-in: keep one live Claude CLI process per bridge session instead of spawning per request |
 | `OPENCLAW_BRIDGE_CLAUDE_LIVE_IDLE_MS` | No | `600000` | Phase 1 live Claude process idle shutdown duration in ms (10 minutes by default) |
 | `OPENCLAW_BRIDGE_PORT` | No | `3456` | API server port |
