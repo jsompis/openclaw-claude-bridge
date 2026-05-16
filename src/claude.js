@@ -218,11 +218,14 @@ class ClaudeLiveProcess {
         this.sessionId = sessionId;
         this.signature = JSON.stringify({ model, systemPrompt: systemPrompt || '', reasoningEffort: reasoningEffort || '' });
         this.liveIdleMs = getClaudeLiveIdleMs();
+        this.createdAt = Date.now();
+        this.lastUsedAt = this.createdAt;
         this.queue = Promise.resolve();
         this.current = null;
         this.buffer = '';
         this.stderrText = '';
         this.closed = false;
+        this.closeError = null;
         this.activeIdleTimer = null;
         this.liveIdleTimer = null;
 
@@ -255,8 +258,9 @@ class ClaudeLiveProcess {
 
     runOne(promptText, attachmentBlocks, onChunk, signal) {
         if (this.closed) {
-            return Promise.reject(new Error('Claude live process is closed'));
+            return Promise.reject(this.closeError || new Error('Claude live process is closed'));
         }
+        this.lastUsedAt = Date.now();
         clearTimeout(this.liveIdleTimer);
         this.stderrText = '';
 
@@ -383,9 +387,13 @@ class ClaudeLiveProcess {
         clearTimeout(this.liveIdleTimer);
         this.clearActiveIdle();
         liveProcessMap.delete(this.key);
+        const detail = this.stderrText ? `: ${this.stderrText.split('\n').slice(-3).join(' | ')}` : '';
+        const closeError = new Error(`Claude live process exited with code ${code}${detail}`);
+        if (code !== 0 || !this.closeError) {
+            this.closeError = closeError;
+        }
         if (this.current) {
-            const detail = this.stderrText ? `: ${this.stderrText.split('\n').slice(-3).join(' | ')}` : '';
-            this.current.reject(new Error(`Claude live process exited with code ${code}${detail}`));
+            this.current.reject(closeError);
             this.current = null;
         }
     }
@@ -395,8 +403,9 @@ class ClaudeLiveProcess {
         clearTimeout(this.liveIdleTimer);
         this.clearActiveIdle();
         liveProcessMap.delete(this.key);
+        this.closeError = new Error(`Failed to spawn Claude live process: ${err.message}`);
         if (this.current) {
-            this.current.reject(new Error(`Failed to spawn Claude live process: ${err.message}`));
+            this.current.reject(this.closeError);
             this.current = null;
         }
     }
@@ -405,6 +414,7 @@ class ClaudeLiveProcess {
         if (this.closed) return;
         console.log(`[claude.js] Stopping live Claude process session=${this.sessionId?.slice?.(0, 8) || 'unknown'} reason=${reason}`);
         this.closed = true;
+        this.closeError = this.closeError || new Error(`Claude live process stopped: ${reason}`);
         clearTimeout(this.liveIdleTimer);
         this.clearActiveIdle();
         liveProcessMap.delete(this.key);
@@ -414,6 +424,21 @@ class ClaudeLiveProcess {
 }
 
 const liveProcessMap = new Map();
+
+function getLiveProcessInfo() {
+    const now = Date.now();
+    return {
+        count: liveProcessMap.size,
+        processes: Array.from(liveProcessMap.values()).map((live) => ({
+            sessionId: live.sessionId?.slice?.(0, 8) || null,
+            pid: live.proc?.pid || null,
+            ageSeconds: Math.max(0, Math.floor((now - live.createdAt) / 1000)),
+            idleMs: Math.max(0, now - live.lastUsedAt),
+            active: !!live.current,
+            closed: !!live.closed,
+        })),
+    };
+}
 
 function runClaudeLive({ systemPrompt, promptText, model, onChunk, signal, reasoningEffort, sessionId, isResume, attachmentBlocks }) {
     if (!sessionId) {
@@ -719,6 +744,7 @@ module.exports = {
     shouldSkipClaudePermissions,
     shouldUseClaudeLive,
     getClaudeLiveIdleMs,
+    getLiveProcessInfo,
     buildClaudeArgs,
     buildClaudeLiveArgs,
     DEFAULT_CLAUDE_LIVE_IDLE_MS,

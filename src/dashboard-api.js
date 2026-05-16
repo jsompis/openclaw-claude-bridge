@@ -13,7 +13,7 @@ const {
     globalActivity,
 } = require('./state-store');
 const { cleanupSessions, getSessionInfo } = require('./session-cleanup');
-const { getContextWindow } = require('./claude');
+const { getContextWindow, getLiveProcessInfo } = require('./claude');
 
 const statusApp = express();
 
@@ -58,6 +58,7 @@ statusApp.get('/status', (req, res) => {
         lastModel: stats.lastModel,
         errors: stats.errors,
         sessions: getSessionInfo(),
+        liveProcesses: getLiveProcessInfo(),
         channels: Array.from(channelMap.entries()).map(([label, val]) => ({
             label: label.replace(/^Guild\s+/, '').slice(0, 40),
             sessionId: val.sessionId.slice(0, 8),
