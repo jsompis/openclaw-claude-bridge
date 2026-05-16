@@ -3,7 +3,7 @@
 // Routing helpers for resolving an inbound /v1/chat/completions request to a
 // stable Claude CLI session.
 //
-// Five identifiers are inspected, in priority order. Trusted transport/context
+// Six identifiers are inspected, in priority order. Trusted transport/context
 // signals intentionally outrank user-visible prompt metadata so a spoofed
 // "Conversation info" block cannot override a stable OpenClaw route:
 //   1. openclawSessionKey  — x-openclaw-session-key HTTP header. Stable for
@@ -16,7 +16,12 @@
 //   4. promptCacheKey    — req.body.prompt_cache_key (OpenAI-style). OpenClaw
 //      attaches the agent session id here, so subagent/cron sessions stay
 //      stable across turns.
-//   5. openAiUser        — req.body.user. Final fallback for raw OpenAI
+//   5. cronContext       — "[cron:<uuid> <jobName>]" prefix at the start of the
+//      user message. OpenClaw cron isolated runs do not forward routing
+//      identity; this structured prefix is a bridge-side fallback so cron
+//      tool-call follow-ups can resume the same Claude CLI session instead of
+//      spawning a fresh one per turn.
+//   6. openAiUser        — req.body.user. Final fallback for raw OpenAI
 //      clients.
 //
 // Without any of these, every turn would create a fresh Claude CLI session.
@@ -104,6 +109,33 @@ function extractAgentName(messages) {
     return null;
 }
 
+/**
+ * Extract OpenClaw cron-runtime context from the user message.
+ * OpenClaw cron isolated runs prepend a structured "[cron:<jobId> <jobName>]"
+ * marker to the user message because they do not forward any other routing
+ * identity (no x-openclaw-session-key, no Inbound Context, no prompt_cache_key,
+ * no user). This bridge-side fallback recovers a stable routing key so cron
+ * tool-call follow-ups can resume the same Claude CLI session within a job
+ * instead of spawning a fresh one per turn.
+ *
+ * The regex is anchored to the START of the user message text and requires a
+ * UUID-shaped jobId (at least 8 hex/dash chars) so untrusted prose containing
+ * the substring "[cron:..." mid-message will NOT trigger routing.
+ */
+function extractCronContext(messages) {
+    for (const msg of messages) {
+        if (msg.role !== 'user') continue;
+        const content = messageContentText(msg);
+        const match = content.match(/^\[cron:([0-9a-fA-F][0-9a-fA-F-]{7,})\s+([^\]\s][^\]]*)\]/);
+        if (!match) continue;
+        const jobId = match[1].trim();
+        const jobName = match[2].trim();
+        if (!jobId || !jobName) continue;
+        return { jobId, jobName, label: `${jobId}:${jobName}` };
+    }
+    return null;
+}
+
 function debugRawRequest(requestId, req, messages) {
     if (process.env.CLAUDE_BRIDGE_DEBUG_RAW_REQUEST !== '1') return;
     try {
@@ -139,14 +171,19 @@ function extractRoutingSignals({ req, body, messages }) {
     const agentName = extractAgentName(messages);
     const openAiUser = body && typeof body.user === 'string' && body.user.trim() ? body.user.trim() : null;
     const promptCacheKey = body && typeof body.prompt_cache_key === 'string' && body.prompt_cache_key.trim() ? body.prompt_cache_key.trim() : null;
-    return { ocSessionKey, convLabel, inboundContext, inboundLabel, agentName, openAiUser, promptCacheKey };
+    const cronContext = extractCronContext(messages);
+    return { ocSessionKey, convLabel, inboundContext, inboundLabel, agentName, openAiUser, promptCacheKey, cronContext };
 }
 
 // Default priority used by the main /v1/chat/completions handler.
-const MAIN_PRIORITY = ['openclawSessionKey', 'inboundContext', 'conversationLabel', 'promptCacheKey', 'openAiUser'];
+// cronContext is a structured fallback that sits between promptCacheKey and
+// the loose openAiUser tail. Trusted/headers/inboundContext/conversationLabel/
+// promptCacheKey still win first so cron prefix can never override a real
+// routing identity.
+const MAIN_PRIORITY = ['openclawSessionKey', 'inboundContext', 'conversationLabel', 'promptCacheKey', 'cronContext', 'openAiUser'];
 // Memflush path still skips openclawSessionKey routing, but trusted inbound
 // context outranks the legacy untrusted conversation block.
-const MEMFLUSH_PRIORITY = ['inboundContext', 'conversationLabel', 'promptCacheKey', 'openAiUser'];
+const MEMFLUSH_PRIORITY = ['inboundContext', 'conversationLabel', 'promptCacheKey', 'cronContext', 'openAiUser'];
 
 /**
  * Pick the active routingSource/routingLabel/routingKey/displayChannel from a
@@ -154,7 +191,7 @@ const MEMFLUSH_PRIORITY = ['inboundContext', 'conversationLabel', 'promptCacheKe
  * handler and the memflush interceptor so the two paths cannot drift.
  */
 function pickRouting(signals, priority = MAIN_PRIORITY) {
-    const { ocSessionKey, convLabel, inboundContext, inboundLabel, agentName, openAiUser, promptCacheKey } = signals;
+    const { ocSessionKey, convLabel, inboundContext, inboundLabel, agentName, openAiUser, promptCacheKey, cronContext } = signals;
     let routingSource = null;
     let routingLabel = null;
     for (const source of priority) {
@@ -178,6 +215,11 @@ function pickRouting(signals, priority = MAIN_PRIORITY) {
             routingLabel = promptCacheKey;
             break;
         }
+        if (source === 'cronContext' && cronContext) {
+            routingSource = 'cronContext';
+            routingLabel = cronContext.label;
+            break;
+        }
         if (source === 'openAiUser' && openAiUser) {
             routingSource = 'openAiUser';
             routingLabel = openAiUser;
@@ -195,6 +237,8 @@ function pickRouting(signals, priority = MAIN_PRIORITY) {
         displayChannel = inboundContext?.channel || inboundLabel;
     } else if (routingSource === 'promptCacheKey') {
         displayChannel = `session:${promptCacheKey}`;
+    } else if (routingSource === 'cronContext') {
+        displayChannel = `cron:${cronContext.jobName}`;
     } else if (routingSource === 'openAiUser') {
         displayChannel = `user:${openAiUser}`;
     }
@@ -209,6 +253,7 @@ module.exports = {
     extractConversationLabel,
     extractInboundContext,
     extractAgentName,
+    extractCronContext,
     debugRawRequest,
     extractRoutingSignals,
     pickRouting,

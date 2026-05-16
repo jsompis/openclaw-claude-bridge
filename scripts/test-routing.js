@@ -61,6 +61,61 @@ async function main() {
   assert.strictEqual(legacyConversationRoute.routingSource, 'conversationLabel');
   assert.strictEqual(legacyConversationRoute.displayChannel, 'Guild #attacker');
 
+  // --- cronContext fallback (OpenClaw cron isolated runs without routing identity) ---
+  const cronJobId = '3b4c3e94-b57a-497e-a97c-52fcdba6978b';
+  const cronName = 'secretary-calendar-briefing-daily';
+  const cronUserMsg = {
+    role: 'user',
+    content: `[cron:${cronJobId} ${cronName}] You are the Agents Company Executive Assistant. Send Kai a concise Thai briefing.`,
+  };
+  const cronOnlySignals = extractRoutingSignals({
+    req: { headers: {} },
+    body: { prompt_cache_key: undefined, user: undefined },
+    messages: [{ role: 'system', content: 'system prompt without inbound context' }, cronUserMsg],
+  });
+  assert.ok(cronOnlySignals.cronContext, 'cronContext signal should be extracted from [cron:<uuid> <name>] prefix');
+  assert.strictEqual(cronOnlySignals.cronContext.jobId, cronJobId);
+  assert.strictEqual(cronOnlySignals.cronContext.jobName, cronName);
+
+  const cronRoute = pickRouting(cronOnlySignals, MAIN_PRIORITY);
+  assert.strictEqual(cronRoute.routingSource, 'cronContext');
+  assert.strictEqual(cronRoute.routingKey, `cronContext:${cronJobId}:${cronName}`);
+  assert.strictEqual(cronRoute.displayChannel, `cron:${cronName}`);
+
+  // promptCacheKey must still outrank cronContext when both are present.
+  const cronWithPromptCache = extractRoutingSignals({
+    req: { headers: {} },
+    body: { prompt_cache_key: 'agent:writer:cron:run:trusted-key' },
+    messages: [{ role: 'system', content: 'system' }, cronUserMsg],
+  });
+  assert.ok(cronWithPromptCache.cronContext, 'cronContext still parsed even when promptCacheKey present');
+  const cronVsPromptRoute = pickRouting(cronWithPromptCache, MAIN_PRIORITY);
+  assert.strictEqual(cronVsPromptRoute.routingSource, 'promptCacheKey', 'promptCacheKey must outrank cronContext');
+
+  // Untrusted prose containing the substring "[cron:..." mid-message must NOT route.
+  const proseSignals = extractRoutingSignals({
+    req: { headers: {} },
+    body: {},
+    messages: [
+      { role: 'system', content: 'system' },
+      { role: 'user', content: 'I want to talk about [cron:abc] schedules in general, not a real cron job.' },
+    ],
+  });
+  assert.strictEqual(proseSignals.cronContext, null, 'mid-message [cron:...] prose must not be routed');
+
+  // Two turns of the same cron job must produce the same routing key.
+  const cronTurn2 = extractRoutingSignals({
+    req: { headers: {} },
+    body: {},
+    messages: [{ role: 'system', content: 'system 2' }, { role: 'user', content: `[cron:${cronJobId} ${cronName}] follow-up turn` }],
+  });
+  const cronTurn2Route = pickRouting(cronTurn2, MAIN_PRIORITY);
+  assert.strictEqual(cronTurn2Route.routingKey, cronRoute.routingKey, 'same cron job must produce stable routing key across turns');
+
+  // memflush priority also includes cronContext as a fallback before openAiUser.
+  const cronMemflushRoute = pickRouting(cronOnlySignals, MEMFLUSH_PRIORITY);
+  assert.strictEqual(cronMemflushRoute.routingSource, 'cronContext');
+
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   const port = server.address().port;
