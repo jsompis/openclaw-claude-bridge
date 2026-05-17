@@ -143,10 +143,19 @@ function debugRawRequest(requestId, req, messages) {
         for (const key of ['x-openclaw-session-key', 'user-agent', 'content-type']) {
             if (req.headers[key]) headers[key] = headerValue(req.headers[key]) || String(req.headers[key]);
         }
+        const body = req.body || {};
         const sample = {
             headers,
-            user: typeof req.body?.user === 'string' ? req.body.user.slice(0, 120) : null,
-            prompt_cache_key: typeof req.body?.prompt_cache_key === 'string' ? req.body.prompt_cache_key.slice(0, 120) : null,
+            model: typeof body.model === 'string' ? body.model.slice(0, 120) : null,
+            stream: typeof body.stream === 'boolean' ? body.stream : null,
+            topLevelKeys: Object.keys(body).sort(),
+            reasoning_effort: body.reasoning_effort ?? null,
+            reasoningEffort: body.reasoningEffort ?? null,
+            reasoning: body.reasoning ?? null,
+            thinking: body.thinking ?? null,
+            thought_level: body.thought_level ?? null,
+            user: typeof body.user === 'string' ? body.user.slice(0, 120) : null,
+            prompt_cache_key: typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key.slice(0, 120) : null,
             messages: (messages || []).slice(0, 6).map((m) => ({
                 role: m.role,
                 text: messageContentText(m).slice(0, 500),
